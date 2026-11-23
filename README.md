@@ -30,7 +30,7 @@ Still missing: HTTPS/TLS, retry and resume, parallel/range downloads, Real-Debri
 ## Queue API (early backend)
 
 - `GET /api/queue` returns persisted item IDs, states, byte counts and safe error messages. It deliberately omits URLs because URLs may contain private query tokens.
-- `POST /api/queue` accepts up to four newline-separated HTTP/HTTPS URLs as a `text/plain` body. Include `X-RD-Command: 1`. The current worker downloads HTTP only; queued HTTPS links report a failure until TLS is implemented.
+- `POST /api/queue` accepts up to four newline-separated plain HTTP URLs as a `text/plain` body. Include `X-RD-Command: 1`. HTTPS is rejected before it enters the queue until a safe TLS transport is implemented.
 - `POST /api/start` starts queued jobs, only after an explicit user action. Include `X-RD-Command: 1`.
 - `DELETE /api/queue/{id}` removes an item. Include `X-RD-Command: 1`.
 

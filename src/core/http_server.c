@@ -83,6 +83,8 @@ static const char index_body[] =
     "'Content-Type':'text/plain'},cache:'no-store'});const t=await r.text();if(!r.ok)throw Error(t||'Request failed');"
     "msg.textContent='';if(path==='/api/queue')document.querySelector('#urls').value='';await refresh()}catch(e){msg.textContent=e.message}}"
     "document.querySelector('#add').onclick=()=>{const b=document.querySelector('#urls').value.trim();"
+    "if(b.split(String.fromCharCode(10)).some(x=>x.trim().toLowerCase().startsWith('https://')))"
+    "{msg.textContent='This build supports http:// links only; HTTPS support is not ready.';return}"
     "if(b)command('/api/queue','POST',b)};"
     "document.querySelector('#start').onclick=()=>{if(document.querySelector('#urls').value.trim())"
     "{msg.textContent='Add the links to the queue first, then press Start.';return}"
@@ -401,7 +403,16 @@ static void handle_client(int fd) {
                 (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
                                     error_body, sizeof(error_body) - 1U);
             } else {
-                int add_result;
+                int add_result, https_unsupported = 0;
+                size_t i;
+                for (i = 0; i < (size_t)count; ++i)
+                    if (strncasecmp(urls[i], "https://", 8U) == 0) https_unsupported = 1;
+                if (https_unsupported) {
+                    static const char error_body[] = "HTTPS is not supported by this MVP build; use an http:// link\n";
+                    (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
+                                        error_body, sizeof(error_body) - 1U);
+                    return;
+                }
                 pthread_mutex_lock(&queue_mutex);
                 add_result = rd_queue_add_batch(&server_queue,
                     (const char (*)[RD_MAX_URL_LENGTH])urls, (size_t)count);
