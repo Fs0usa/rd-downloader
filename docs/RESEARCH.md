@@ -1,6 +1,6 @@
 # Engineering research and audit
 
-Audit date: 2026-11-23. The workspace contains the `rd-downloader-v2` ZIP contents, but not upstream checkouts. GitHub is not resolvable from this environment (`git ls-remote` fails with `Could not resolve host: github.com`). Web-accessible upstream documentation was consulted; source-level verification that requires cloning/building those repositories remains outstanding. No PS5 console or SDK is available here.
+Audit date: 2026-11-23. This file includes an initial bootstrap audit and later research updates; consult [`IMPLEMENTATION.md`](IMPLEMENTATION.md) for current project status. The SDK is now installed locally, the PS5 ELF cross-builds, and the user confirmed one direct HTTPS download on their PS5. The workspace still lacks pinned local checkouts for WFM helper and DebridDownloader, so those repositories have not received a full source/build audit here. Some statements below are historical snapshots and are explicitly superseded by the later implementation updates.
 
 > Historical audit snapshot: the sections below record the initial bootstrap state. The implementation update at the end records what has since been built and tested in this workspace.
 
@@ -8,7 +8,7 @@ Audit date: 2026-11-23. The workspace contains the `rd-downloader-v2` ZIP conten
 
 The bootstrap contains five C implementation files, four headers, three small host test programs and a Makefile. The only application entry point is a `main()` that prints a smoke message. There is no HTTP server/client, TLS, persistent queue, worker, storage discovery, Real-Debrid client, archive IPC, UI, or ELF artifact. The C primitives are host-testable; their presence does not establish downloader functionality.
 
-### Existing primitive behavior and gaps
+### Initial bootstrap snapshot (historical)
 
 - `rd_plan_ranges` builds inclusive, contiguous byte ranges. It avoids total-plus-divisor overflow in the range-count calculation. The public return type is `int`, while `max_connections` is unsigned; an extreme caller-supplied connection count can exceed `INT_MAX` before the cast. Production callers must clamp this input.
 - `rd_parse_url_batch` trims whitespace and accepts only lowercase-insensitive HTTP(S) schemes with a nonempty authority substring. It is a lightweight syntax gate, not a complete URL parser; it does not fully validate host/port syntax, percent encoding, userinfo policy, or URL control characters.
@@ -56,7 +56,7 @@ The official documentation gives the REST base URL `https://api.real-debrid.com/
 
 ## Dependency and platform compatibility
 
-No dependency has been built against the project's target SDK. `libmicrohttpd` is used by upstream websrv according to its makefile, but is not listed in this project and no SDK package availability was checked locally. TLS, HTTP client, JSON parser, persistence format, compression, and archive IPC dependencies have not been selected or validated. Host tests only prove the four primitive translation units compile with GCC under the current host flags.
+The initial audit predates the current implementation. The project now builds with the SDK's `libSceHttp` and `libSceSsl`, and includes a native HTTP server, queue persistence and direct download transports. Host tests do not prove PS5 behavior. WFM helper and Real-Debrid dependencies remain unintegrated; see [`IMPLEMENTATION.md`](IMPLEMENTATION.md) for the remaining work.
 
 ## Unresolved risks / evidence still needed
 
@@ -79,7 +79,7 @@ The [owendswang/ps5-aria2 PS5 build guide](https://github.com/owendswang/ps5-ari
 
 ### Current transport implementation
 
-The project now has a bounded sequential HTTP/1.x socket downloader in `src/core/http_client.c`, a small URL/response parser, an explicit-start pthread worker, persistent queue states, and a mobile queue page. It supports plain HTTP only. It streams to a `.part` file, preserves partial data on errors/restart, checks known content length against available space plus 16 MiB, and atomically renames a complete file. HTTPS, range requests, automatic resume, retries, pause/cancel, `Content-Disposition`, and runtime PS5 validation remain open. Host parser and queue tests pass; the target ELF cross-build passes. The latest worker build has not yet been loaded on the console.
+Historical transport note: the original host socket path supported plain HTTP only. The current PS5 HTTPS path is described in the following update and has been validated by the user with one sample URL. Host tests do not exercise PS5 TLS. Range resume, segmented transfers, `Content-Disposition`, and broader runtime coverage remain open.
 
 ## HTTPS transport implementation update (2026-11-23)
 
@@ -87,7 +87,7 @@ The SDK v0.50 installed in this workspace provides import stubs for `libSceHttp.
 
 The project now compiles the PS5 transport in `src/core/ps5_http_client.c`, links `-lSceHttp -lSceSsl`, embeds the Debian `ca-certificates` PEM bundle, enables the server/hostname/known-CA/SNI TLS option mask (`0xA5`), and manually follows at most five redirects. HTTPS-to-HTTP redirects are refused. Host builds keep the existing POSIX HTTP implementation and do not exercise the PS5 TLS code. The CA bundle was generated from `/etc/ssl/certs/ca-certificates.crt` (148 PEM certificates in this build) by `scripts/embed-ca-bundle.py`; regenerate using the installed Debian `ca-certificates` package when roots need updating. Mozilla CA data is distributed under MPL-2.0; preserve this notice and source provenance.
 
-The `0xA5` option interpretation is based on reverse-engineered PS4/HTTP behavior documentation (server validation, common-name validation, known CA, and SNI), not an official PS5 public header. The source reference's use of `sceSslLoadCert` is direct evidence for API sequencing, but this exact payload's TLS initialization, roots, redirects, ABI calls, and large transfer have only been cross-compiled here. They are **not yet verified on a PS5**. Host tests cannot validate PS5 TLS, and the current execution environment blocks local sockets, so end-to-end HTTP transfer simulation was not possible here. [HTTP option reference](https://yharnam-hunters.github.io/byrgenwerth-site/runtime-reference/).
+The `0xA5` option interpretation is based on reverse-engineered PS4/HTTP behavior documentation (server validation, common-name validation, known CA, and SNI), not an official PS5 public header. The user later confirmed that one HTTPS sample completed on their PS5; this is real-hardware evidence for that tested URL, not broad TLS coverage. Host tests cannot validate PS5 TLS. [HTTP option reference](https://yharnam-hunters.github.io/byrgenwerth-site/runtime-reference/).
 
 The prior user report that the payload stopped when a download started also matched a 64 KiB default pthread stack in PS5-focused community code. The project moved large queue copies to the heap and now requests a 1 MiB stack for the persistent worker. This is a process-level worker setting; it makes no kernel or firmware changes. The corrected stack size and the HTTPS path both still require on-console validation.
 

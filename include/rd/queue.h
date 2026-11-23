@@ -35,6 +35,7 @@ typedef struct rd_queue_item {
     unsigned long long speed_bps;
     unsigned long long average_bps;
     unsigned long long eta_seconds;
+    int legacy_partial;
     int extract_after_download;
     /* Password is intentionally in-memory only and never serialized. */
     char extraction_password[RD_MAX_PASSWORD_LENGTH];

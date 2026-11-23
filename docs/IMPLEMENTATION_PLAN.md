@@ -33,7 +33,7 @@ The original ZIP contained no usable Git history. The project is now under Git; 
 
 The dependency-free socket server serves `/`, `/api/health`, and the mobile queue UI. Linux mode binds to `127.0.0.1`; PS5 mode binds to `0.0.0.0:8090`. The user confirmed LAN access and an earlier queue file persisted across the prior build. The current queue file is versioned and migrated atomically from that earlier format. The PS5 state path is `/data/rd-downloader-queue.db`. The new UI adds links, displays state/progress/error, supports removal, and requires an explicit Start action.
 
-The current build status and limitations are tracked in [`IMPLEMENTATION.md`](IMPLEMENTATION.md). In addition to the original HTTP worker, the queue page now has confirmation, URL-derived filenames, cooperative pause/resume, retry, removal, destination display and transfer-rate/ETA fields. Archive extraction, range resume, Real-Debrid and configurable destinations are still incomplete. The current milestone compiles, but the new queue controls need real hardware validation.
+The current build status and limitations are tracked in [`IMPLEMENTATION.md`](IMPLEMENTATION.md). The queue page has confirmation, immediate start, URL-derived filenames, cooperative pause/resume, retry, confirmed active-stop/removal, destination display and transfer-rate/ETA fields. RDQ6 records the legacy partial-file naming transition. Archive extraction, range resume, Real-Debrid and configurable destinations are still incomplete. This working-tree milestone compiles, but the new queue controls need real hardware validation.
 
 For iterative deployment, `elfldr` creates one process per incoming payload; it does not replace a previous copy. Raw ELF deployment is named `payload.elf`. Stop only the identifiable old RD Downloader process in Payload Manager before replacing it, then confirm port 8090 is released. Do not terminate an uncertain process just because it has the generic name. No reboot is needed for each build. During a transfer, termination preserves the `.part` file and startup marks that job failed; retry starts over after safely removing that partial file. Byte-range resume is not implemented.
 
@@ -91,7 +91,7 @@ For iterative deployment, `elfldr` creates one process per incoming payload; it 
 
 ## Immediate next action
 
-The user confirmed that the HTTPS RAR sample download completed with build `0.3.0-https-dev`; this is the working checkpoint. Next, compare the resulting file hash with a trusted sample hash when available, then extend validation to additional HTTPS hosts and redirects before increasing transfer size.
+On the PS5, stop only the identifiable old RD Downloader process in Payload Manager, deploy the newly built ELF, and validate: (1) confirmation starts a download without pressing a second Start button, (2) the optional password is visible in the modal, (3) the AkiraBox-style URL saves as `_DLPSGAME.COM_-PPSA21402.rar.part` while active and `.rar` when complete, and (4) confirmed stop aborts the transfer, removes the partial file, and removes the queue row. Test pause/resume/retry after these checks. Do not test the unrar toggle as functional yet; WFM IPC is the next implementation milestone.
 
 ## Reproduction commands
 

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rd/queue.h"
+#include "rd/output.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -10,33 +11,6 @@
 #include <unistd.h>
 
 static int has_http_scheme(const char *s, size_t n);
-
-static void derive_filename(const char *url, char *filename, size_t capacity) {
-    const char *scheme = strstr(url, "://");
-    const char *path = scheme ? strchr(scheme + 3, '/') : NULL;
-    const char *base = path ? path + 1 : "";
-    const char *end = strpbrk(base, "?#");
-    size_t length = end ? (size_t)(end - base) : strlen(base), i, used = 0;
-    const char *last_slash = NULL;
-    for (i = 0; i < length; ++i) if (base[i] == '/') last_slash = base + i;
-    if (last_slash) { length -= (size_t)(last_slash + 1 - base); base = last_slash + 1; }
-    for (i = 0; i < length && used + 1U < capacity; ++i) {
-        unsigned char c = (unsigned char)base[i];
-        if (c == '%' && i + 2U < length && isxdigit((unsigned char)base[i + 1U]) &&
-            isxdigit((unsigned char)base[i + 2U])) {
-            char hex[3] = { base[i + 1U], base[i + 2U], '\0' };
-            c = (unsigned char)strtoul(hex, NULL, 16);
-            i += 2U;
-        }
-        if (c < 0x80U && !(isalnum(c) || c == '.' || c == '_' || c == '-')) c = '_';
-        filename[used++] = (char)c;
-    }
-    while (used && filename[used - 1U] == '.') --used;
-    filename[used] = '\0';
-    if (!used || (used == 1U && filename[0] == '.') ||
-        (used == 2U && filename[0] == '.' && filename[1] == '.'))
-        snprintf(filename, capacity, "download.bin");
-}
 
 static int save_queue(const rd_queue *queue) {
     char temporary[sizeof(queue->state_path) + 16U];
@@ -49,7 +23,7 @@ static int save_queue(const rd_queue *queue) {
     if (fd < 0) return -1;
     file = fdopen(fd, "w");
     if (!file) { close(fd); unlink(temporary); return -1; }
-    if (fprintf(file, "RDQ5\t%lu\n", queue->next_id) < 0) failed = 1;
+    if (fprintf(file, "RDQ6\t%lu\n", queue->next_id) < 0) failed = 1;
     for (i = 0; !failed && i < queue->count; ++i) {
         const unsigned char *url = (const unsigned char *)queue->items[i].url;
         if (fprintf(file, "%lu\t%u\t%llu\t%llu\t", queue->items[i].id,
@@ -62,7 +36,7 @@ static int save_queue(const rd_queue *queue) {
             }
         }
         if (failed || fputc('\t', file) == EOF) { failed = 1; break; }
-        if (fprintf(file, "%d\t%s\t%s\t", !!queue->items[i].extract_after_download,
+        if (fprintf(file, "%d\t%d\t%s\t%s\t", queue->items[i].legacy_partial, !!queue->items[i].extract_after_download,
                     queue->items[i].filename, queue->items[i].destination) < 0) { failed = 1; break; }
         for (j = 0; url[j]; ++j) {
             if (fprintf(file, "%02X", (unsigned int)url[j]) < 0) { failed = 1; break; }
@@ -87,12 +61,13 @@ static int load_queue(rd_queue *queue) {
     if (!file) return errno == ENOENT ? 0 : -1;
     if (!fgets(line, sizeof(line), file) ||
         (strncmp(line, "RDQ2\t", 5U) != 0 && strncmp(line, "RDQ3\t", 5U) != 0 &&
-         strncmp(line, "RDQ4\t", 5U) != 0 && strncmp(line, "RDQ5\t", 5U) != 0)) {
+         strncmp(line, "RDQ4\t", 5U) != 0 && strncmp(line, "RDQ5\t", 5U) != 0 &&
+         strncmp(line, "RDQ6\t", 5U) != 0)) {
         fclose(file);
         return -1;
     }
     version = line[3] - '0';
-    if (version < 2 || version > 5) { fclose(file); return -1; }
+    if (version < 2 || version > 6) { fclose(file); return -1; }
     errno = 0;
     stored_next_id = strtoul(line + 5, &header_end, 10);
     if (errno || header_end == line + 5 || stored_next_id == 0 ||
@@ -101,7 +76,7 @@ static int load_queue(rd_queue *queue) {
         return -1;
     }
     queue->next_id = stored_next_id;
-    needs_save = version < 5;
+    needs_save = version < 6;
     while (fgets(line, sizeof(line), file)) {
         char *tab = strchr(line, '\t');
         char *end;
@@ -166,6 +141,13 @@ static int load_queue(rd_queue *queue) {
         item->extract_after_download = 1;
         item->expected_bytes = expected;
         item->downloaded_bytes = downloaded;
+        if (version >= 6) {
+            if ((tab[0] != '0' && tab[0] != '1') || tab[1] != '\t') goto bad_file;
+            item->legacy_partial = tab[0] == '1';
+            tab += 2;
+        } else {
+            item->legacy_partial = interrupted || state == RD_JOB_FAILED || state == RD_JOB_PAUSED;
+        }
         if (version >= 5) {
             char *extract_end;
             char *value_end;
@@ -187,7 +169,7 @@ static int load_queue(rd_queue *queue) {
             item->extract_after_download = (int)extract;
         }
         if (interrupted || state == (unsigned int)RD_JOB_PAUSED) {
-            state = (unsigned int)RD_JOB_FAILED;
+            item->state = RD_JOB_FAILED;
             needs_save = 1;
             snprintf(item->error, sizeof(item->error), "Interrupted by payload restart; partial output kept");
         }
@@ -203,7 +185,7 @@ static int load_queue(rd_queue *queue) {
             item->url[i / 2U] = (char)byte;
         }
         if (!has_http_scheme(item->url, strlen(item->url))) goto bad_file;
-        if (!item->filename[0]) derive_filename(item->url, item->filename, sizeof(item->filename));
+        rd_download_filename(item->url, item->filename, sizeof(item->filename));
         ++queue->count;
     }
     if (ferror(file)) goto bad_file;
@@ -246,7 +228,7 @@ int rd_queue_add_batch_options(rd_queue *queue, const char (*urls)[RD_MAX_URL_LE
         item->extract_after_download = !!extract_after_download;
         snprintf(item->destination, sizeof(item->destination), "%s", RD_DEFAULT_DESTINATION);
         memcpy(item->url, urls[i], url_length + 1U);
-        derive_filename(item->url, item->filename, sizeof(item->filename));
+        rd_download_filename(item->url, item->filename, sizeof(item->filename));
         if (password && *password) snprintf(item->extraction_password, sizeof(item->extraction_password), "%s", password);
     }
     if (save_queue(candidate) != 0) { free(candidate); return -1; }

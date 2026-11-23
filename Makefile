@@ -21,7 +21,7 @@ endif
 
 ELF := rd-downloader.elf
 CFLAGS := -Wall -Wextra -Werror -O2 -pthread -Iinclude
-SOURCES := src/main.c src/core/range_plan.c src/core/space_plan.c src/core/archive.c src/core/queue.c
+SOURCES := src/main.c src/core/range_plan.c src/core/space_plan.c src/core/archive.c src/core/queue.c src/core/output.c
 SOURCES += src/core/http_server.c
 SOURCES += src/core/http_client.c src/core/ps5_http_client.c
 PS5_HTTP_LIBS := -lSceHttp -lSceSsl
@@ -29,7 +29,7 @@ PS5_HTTP_LIBS := -lSceHttp -lSceSsl
 .PHONY: all clean host-test host-server host-run deploy
 all: $(ELF)
 
-$(ELF): $(SOURCES) src/core/ca_bundle_pem.inc include/rd/range_plan.h include/rd/space_plan.h include/rd/archive.h include/rd/queue.h include/rd/http_server.h include/rd/http_client.h
+$(ELF): $(SOURCES) src/core/ca_bundle_pem.inc include/rd/range_plan.h include/rd/space_plan.h include/rd/archive.h include/rd/queue.h include/rd/output.h include/rd/http_server.h include/rd/http_client.h
 	$(CC) $(CFLAGS) -o $@ $(SOURCES) $(PS5_HTTP_LIBS)
 
 host-test:
@@ -37,19 +37,19 @@ host-test:
 		tests/test_range_plan.c src/core/range_plan.c -o build-range-tests
 	./build-range-tests
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -Iinclude \
-		tests/test_space_archive.c src/core/space_plan.c src/core/archive.c src/core/queue.c -o build-space-tests
+		tests/test_space_archive.c src/core/space_plan.c src/core/archive.c src/core/queue.c src/core/output.c -o build-space-tests
 	./build-space-tests
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -Iinclude \
-		tests/test_queue.c src/core/queue.c -o build-queue-tests
+		tests/test_queue.c src/core/queue.c src/core/output.c -o build-queue-tests
 	./build-queue-tests
 	$(HOST_CC) -std=c11 -DRD_HOST_BUILD -Wall -Wextra -Werror -O2 -Iinclude \
-		tests/test_http_client.c src/core/http_client.c -o build-http-tests
+		tests/test_http_client.c src/core/http_client.c src/core/output.c -o build-http-tests
 	./build-http-tests
 	rm -f build-range-tests build-space-tests build-queue-tests build-http-tests
 
-host-server: src/main.c src/core/http_server.c src/core/http_client.c src/core/queue.c src/core/archive.c include/rd/http_server.h include/rd/http_client.h include/rd/queue.h include/rd/archive.h
+host-server: src/main.c src/core/http_server.c src/core/http_client.c src/core/queue.c src/core/output.c src/core/archive.c include/rd/http_server.h include/rd/http_client.h include/rd/queue.h include/rd/output.h include/rd/archive.h
 	$(HOST_CC) -std=c11 -D_DEFAULT_SOURCE -DRD_HOST_BUILD -Wall -Wextra -Werror -O2 -pthread -Iinclude \
-		src/main.c src/core/http_server.c src/core/http_client.c src/core/ps5_http_client.c src/core/queue.c src/core/archive.c -o rd-downloader-host
+		src/main.c src/core/http_server.c src/core/http_client.c src/core/ps5_http_client.c src/core/queue.c src/core/output.c src/core/archive.c -o rd-downloader-host
 
 host-run: host-server
 	./rd-downloader-host

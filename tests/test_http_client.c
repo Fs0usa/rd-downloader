@@ -36,6 +36,11 @@ int main(void) {
     assert(rd_http_download("https://example.com/file", "/tmp", 1, NULL, NULL,
                             error, sizeof(error)) != 0);
     assert(strstr(error, "plain HTTP") != NULL);
+    rd_http_begin(99);
+    rd_http_cancel(99);
+    assert(rd_http_set_handle(99, -1) != 0);
+    rd_http_begin(99);
+    assert(rd_http_set_handle(99, -1) == 0);
     puts("HTTP parser tests: OK");
     return 0;
 }

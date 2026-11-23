@@ -2,6 +2,7 @@
 #include "rd/queue.h"
 #include "rd/http_client.h"
 #include "rd/archive.h"
+#include "rd/output.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -34,7 +35,7 @@ static rd_queue server_queue;
 static int queue_ready;
 static pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t worker_condition = PTHREAD_COND_INITIALIZER;
-static int download_requested;
+static int download_requested = 1;
 static int worker_started;
 static unsigned long active_download_id;
 
@@ -58,7 +59,7 @@ static const char index_body[] =
     ".actions{display:flex;gap:6px}.icon{padding:8px 11px;min-width:42px}.dest{padding:10px;border-radius:8px;"
     "background:#15121c;color:#d6c9f1}.modal{position:fixed;inset:0;background:#000a;display:grid;place-items:center;padding:16px}"
     ".dialog{width:min(100%,520px);background:#211d2d;border:1px solid #504663;border-radius:14px;padding:18px}"
-    ".dialog input[type=password]{width:100%;padding:11px;background:#15121c;color:white;border:1px solid #504663;border-radius:8px}"
+    ".dialog #password{width:100%;padding:11px;background:#15121c;color:white;border:1px solid #504663;border-radius:8px}"
     ".row{display:flex;align-items:center;gap:9px;margin:16px 0}.hidden{display:none}.metrics{display:flex;gap:12px;flex-wrap:wrap}"
     ".backend{font-size:.9rem;margin-top:8px}.online{color:#8de0a4}.offline{color:#ff9a9a}"
     "</style></head><body><header><h1>RD Downloader</h1>"
@@ -68,7 +69,7 @@ static const char index_body[] =
     "<p class=\"muted\">Paste one HTTP or HTTPS link per line.</p>"
     "<textarea id=\"urls\" placeholder=\"https://example.com/file.zip\"></textarea>"
     "<p class=\"dest\">Downloads will be saved to <strong>/data/homebrew</strong>.</p>"
-    "<p><button id=\"add\">Review and add</button> <button id=\"start\">Start queued downloads</button></p>"
+    "<p><button id=\"add\">Review and add</button></p>"
     "<div id=\"message\" class=\"error\" role=\"status\"></div>"
     "</section><section class=\"card\"><strong>Queue</strong><ul id=\"queue\"></ul>"
     "<div id=\"empty\" class=\"muted\">No queued links.</div></section>"
@@ -78,14 +79,15 @@ static const char index_body[] =
     "<p class=\"row\"><input id=\"extract\" type=\"checkbox\" checked><label for=\"extract\">Extract archives after download</label></p>"
     "<small>Archive extraction is not active in this build; archive jobs will wait for helper integration.</small>"
     "<label for=\"password\">Archive password <span class=\"muted\">(optional)</span></label>"
-    "<input id=\"password\" type=\"password\" maxlength=\"255\" autocomplete=\"new-password\" placeholder=\"Leave blank if not needed\">"
-    "<p class=\"error\" id=\"modalMessage\" role=\"status\"></p><button id=\"confirm\">Confirm and add</button> "
+    "<input id=\"password\" type=\"text\" spellcheck=\"false\" autocapitalize=\"none\" maxlength=\"255\" autocomplete=\"off\" placeholder=\"Leave blank if not needed\">"
+    "<p class=\"error\" id=\"modalMessage\" role=\"status\"></p><button id=\"confirm\">Start download</button> "
     "<button id=\"abort\" type=\"button\">Cancel</button></div></div>"
     "<script>"
     "const list=document.querySelector('#queue'),empty=document.querySelector('#empty'),msg=document.querySelector('#message');"
     "function size(n){n=Number(n)||0;if(n<1024)return n+' B';const u=['KB','MB','GB','TB'];let i=-1;"
     "do{n/=1024;i++}while(n>=1024&&i<u.length-1);return n.toFixed(1)+' '+u[i]}"
     "function offlineMessage(){return 'Cannot reach PS5 service. Check whether the payload stopped in Payload Manager, then reload.'}"
+    "let confirmId=null;"
     "async function refresh(){try{const r=await fetch('/api/queue',{cache:'no-store'});"
     "if(!r.ok)throw Error('PS5 service returned HTTP '+r.status);const d=await r.json();"
     "const backend=document.querySelector('#backend');backend.className='backend online';"
@@ -107,8 +109,10 @@ static const char index_body[] =
     "const pausing=item.state!=='paused';toggle.textContent=pausing?'Ⅱ':'▶';toggle.title=pausing?'Pause':'Resume';toggle.setAttribute('aria-label',toggle.title+' '+item.filename);"
     "toggle.onclick=()=>command('/api/queue/'+item.id+'/'+(pausing?'pause':'resume'),'POST','');actions.append(toggle)}"
     "if(item.state==='failed'){const retry=document.createElement('button');retry.className='icon';retry.textContent='↻';retry.title='Retry';retry.setAttribute('aria-label','Retry '+item.filename);retry.onclick=()=>command('/api/queue/'+item.id+'/retry','POST','');actions.append(retry)}"
-    "const remove=document.createElement('button');remove.className='icon';remove.textContent='×';remove.title='Remove from queue';remove.setAttribute('aria-label','Remove '+item.filename+' from queue');"
-    "remove.onclick=()=>command('/api/queue/'+item.id,'DELETE');actions.append(remove);li.append(label,state,actions);list.append(li)}}"
+    "const stopping=item.state==='downloading'||item.state==='paused';const actionLabel=stopping?'Stop download and delete its partial file':'Remove from queue';"
+    "const remove=document.createElement('button');remove.className='icon';remove.textContent=confirmId===item.id?'Confirm?':'×';remove.title=actionLabel;remove.setAttribute('aria-label',actionLabel+' for '+item.filename);"
+    "if(confirmId===item.id){remove.title='Confirm: '+actionLabel;remove.setAttribute('aria-label',remove.title)}"
+    "remove.onclick=()=>{if(confirmId!==item.id||remove.textContent!=='Confirm?'){confirmId=item.id;remove.textContent='Confirm?';remove.title='Confirm: '+actionLabel;remove.setAttribute('aria-label',remove.title);refresh();return}confirmId=null;remove.disabled=true;command('/api/queue/'+item.id,'DELETE')};actions.append(remove);li.append(label,state,actions);list.append(li)}}"
     "catch(e){empty.hidden=true;const backend=document.querySelector('#backend');"
     "backend.className='backend offline';backend.textContent='PS5 service unreachable';"
     "msg.textContent=e instanceof TypeError?offlineMessage():e.message}}"
@@ -124,9 +128,7 @@ static const char index_body[] =
     "const pw=document.querySelector('#password').value;if(pw)headers['X-RD-Password']=pw;try{const r=await fetch('/api/queue',{method:'POST',body:b,headers,cache:'no-store'});"
     "const t=await r.text();if(!r.ok)throw Error(t||'Request failed');document.querySelector('#urls').value='';document.querySelector('#password').value='';"
     "modal.classList.add('hidden');msg.textContent='';await refresh()}catch(e){document.querySelector('#modalMessage').textContent=e.message}};"
-    "document.querySelector('#start').onclick=()=>{if(document.querySelector('#urls').value.trim())"
-    "{msg.textContent='Add the links to the queue first, then press Start.';return}"
-    "command('/api/start','POST','')};refresh();setInterval(refresh,2500);"
+    "refresh();setInterval(refresh,2500);"
     "</script></body></html>\n";
 
 static int send_response(int fd, int status, const char *reason,
@@ -335,6 +337,29 @@ static int record_progress(unsigned long long downloaded, unsigned long long exp
     return found ? 0 : -1;
 }
 
+static const char *download_directory(const rd_queue_item *item) {
+#ifdef RD_HOST_BUILD
+    (void)item;
+    return RD_DOWNLOAD_DIRECTORY;
+#else
+    return item->destination;
+#endif
+}
+
+static int discard_output(const rd_queue_item *item, int include_final) {
+    const char *directory = download_directory(item);
+    rd_output output;
+    if (item->legacy_partial)
+        return rd_http_reset_legacy_partial(item->url, directory, item->id);
+    if (rd_output_paths(&output, directory, item->url, item->id)) return -1;
+    return rd_output_discard(&output, include_final);
+}
+
+static int finish_removal(rd_queue_item *item) {
+    if (discard_output(item, item->state == RD_JOB_CANCELLED)) return -1;
+    return rd_queue_remove(&server_queue, item->id);
+}
+
 static void *download_worker(void *unused) {
     (void)unused;
     for (;;) {
@@ -356,13 +381,10 @@ static void *download_worker(void *unused) {
                 continue;
             }
             id = item->id;
+            rd_http_begin(id);
             active_download_id = id;
             memcpy(url, item->url, sizeof(url));
-#ifdef RD_HOST_BUILD
-            snprintf(destination, sizeof(destination), "%s", RD_DOWNLOAD_DIRECTORY);
-#else
-            snprintf(destination, sizeof(destination), "%s", item->destination);
-#endif
+            snprintf(destination, sizeof(destination), "%s", download_directory(item));
             break;
         }
         if (!id) {
@@ -385,6 +407,11 @@ static void *download_worker(void *unused) {
         for (i = 0; i < server_queue.count; ++i) {
             rd_queue_item *item = &server_queue.items[i];
             if (item->id != id) continue;
+            if (item->state == RD_JOB_CANCELLED) {
+                if (finish_removal(item))
+                    snprintf(item->error, sizeof(item->error), "Cleanup failed. Confirm removal to retry.");
+                break;
+            }
             rd_archive_name archive_name;
             int is_archive = rd_classify_archive_name(item->filename, &archive_name) == 0 &&
                              archive_name.kind != RD_ARCHIVE_NONE;
@@ -394,6 +421,8 @@ static void *download_worker(void *unused) {
             const char *final_error = result != 0 ? error :
                 ((item->extract_after_download && is_archive) ?
                  "Downloaded; extraction helper is not integrated yet" : "");
+            if (result == 0 && discard_output(item, 0) != 0)
+                final_error = "Downloaded. Could not remove temporary file reference.";
             if (rd_queue_update(&server_queue, id,
                     final_state,
                     item->downloaded_bytes, item->expected_bytes,
@@ -500,6 +529,11 @@ static void handle_client(int fd) {
                 return;
             }
             request[body_offset + body_length] = '\0';
+            if (!queue_ready || !worker_started) {
+                static const char error_body[] = "download worker or queue unavailable\n";
+                (void)send_response(fd, 503, "Service Unavailable", "text/plain", error_body, sizeof(error_body)-1);
+                return;
+            }
             count = rd_parse_url_batch(request + body_offset, urls, 4);
             extract_enabled = strcmp(extract_setting, "1") == 0;
             if (count <= 0) {
@@ -512,6 +546,10 @@ static void handle_client(int fd) {
                 add_result = rd_queue_add_batch_options(&server_queue,
                     (const char (*)[RD_MAX_URL_LENGTH])urls, (size_t)count,
                     extract_enabled, password);
+                if (add_result >= 0) {
+                    download_requested = 1;
+                    pthread_cond_signal(&worker_condition);
+                }
                 pthread_mutex_unlock(&queue_mutex);
                 if (add_result < 0) {
                     static const char error_body[] = "queue persistence failed or queue is full\n";
@@ -527,7 +565,6 @@ static void handle_client(int fd) {
             const char *action = *end == '/' ? end + 1 : "";
             size_t i;
             int found = 0, action_result = -1;
-            char url[RD_MAX_URL_LENGTH] = "", destination[512] = "";
             if (!command_header_ok(request) || !id || *end != '/' || !*action || body_length != 0) {
                 static const char error_body[] = "invalid queue action\n";
                 (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
@@ -549,13 +586,8 @@ static void handle_client(int fd) {
                         if (next == RD_JOB_QUEUED) download_requested = 1;
                         pthread_cond_broadcast(&worker_condition);
                     } else if (strcmp(action, "retry") == 0 && item->state == RD_JOB_FAILED && !active_download_id) {
-                        memcpy(url, item->url, sizeof(url));
-#ifdef RD_HOST_BUILD
-                        snprintf(destination, sizeof(destination), "%s", RD_DOWNLOAD_DIRECTORY);
-#else
-                        snprintf(destination, sizeof(destination), "%s", item->destination);
-#endif
-                        if (rd_http_reset_partial(url, destination, id) == 0) {
+                        if (discard_output(item, 0) == 0) {
+                            item->legacy_partial = 0;
                             action_result = rd_queue_update(&server_queue, id, RD_JOB_QUEUED, 0, 0, "");
                             if (action_result == 0) {
                                 item = &server_queue.items[i];
@@ -596,26 +628,29 @@ static void handle_client(int fd) {
                     (void)send_response(fd, 503, "Service Unavailable", "text/plain; charset=utf-8",
                                         error_body, sizeof(error_body) - 1U);
                 } else {
-                    int remove_result;
-                    int active = 0;
+                    int remove_result = -2;
                     size_t i;
                     pthread_mutex_lock(&queue_mutex);
-                    for (i = 0; i < server_queue.count; ++i)
-                        if (server_queue.items[i].id == id && active_download_id == id) active = 1;
-                    remove_result = active ? -3 : rd_queue_remove(&server_queue, id);
-                    pthread_mutex_unlock(&queue_mutex);
-                    if (remove_result == -3) {
-                        static const char error_body[] = "active download cannot be removed yet\n";
-                        (void)send_response(fd, 409, "Conflict", "text/plain; charset=utf-8",
-                                            error_body, sizeof(error_body) - 1U);
-                        return;
+                    for (i = 0; i < server_queue.count; ++i) {
+                        rd_queue_item *item = &server_queue.items[i];
+                        if (item->id != id) continue;
+                        if (active_download_id == id) {
+                            remove_result = rd_queue_update(&server_queue, id, RD_JOB_CANCELLED,
+                                item->downloaded_bytes, item->expected_bytes, "Stopping download");
+                            if (remove_result == 0) rd_http_cancel(id);
+                            pthread_cond_broadcast(&worker_condition);
+                        } else {
+                            remove_result = finish_removal(item);
+                        }
+                        break;
                     }
+                    pthread_mutex_unlock(&queue_mutex);
                     if (remove_result == -2) {
                         static const char error_body[] = "queue item not found\n";
                         (void)send_response(fd, 404, "Not Found", "text/plain; charset=utf-8",
                                             error_body, sizeof(error_body) - 1U);
                     } else if (remove_result != 0) {
-                        static const char error_body[] = "queue persistence failed\n";
+                        static const char error_body[] = "could not clean up download or save queue\n";
                         (void)send_response(fd, 503, "Service Unavailable", "text/plain; charset=utf-8",
                                             error_body, sizeof(error_body) - 1U);
                     } else {
@@ -654,6 +689,14 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
 #else
     queue_ready = rd_queue_init(&server_queue, "/data/rd-downloader-queue.db") == 0;
 #endif
+
+    if (queue_ready) {
+        for (size_t i = server_queue.count; i > 0; --i) {
+            rd_queue_item *item = &server_queue.items[i - 1];
+            if (item->state == RD_JOB_CANCELLED && finish_removal(item))
+                snprintf(item->error, sizeof(item->error), "Cleanup failed. Confirm removal to retry.");
+        }
+    }
 
     {
         pthread_t worker;

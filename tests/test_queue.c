@@ -1,11 +1,14 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rd/queue.h"
+#include "rd/output.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 static void write_hex(FILE *file, const char *text) {
     size_t i;
     for (i = 0; text[i]; ++i) fprintf(file, "%02X", (unsigned char)text[i]);
@@ -17,11 +20,47 @@ int main(void) {
     assert(n == 2);
     assert(strcmp(urls[0], "https://cdn.example/file.part01.rar") == 0);
     assert(strcmp(urls[1], "http://cdn.example/file.part02.rar") == 0);
+    {
+        rd_output output;
+        char url[] = "https://akirabox.com/download/e1.token/%5BDLPSGAME.COM%5D-PPSA21402.rar";
+        char filename[512];
+        rd_download_filename(url, filename, sizeof(filename));
+        assert(strcmp(filename, "_DLPSGAME.COM_-PPSA21402.rar") == 0);
+        assert(rd_output_paths(&output, "/data/homebrew", url, 10) == 0);
+        assert(strcmp(output.final, "/data/homebrew/_DLPSGAME.COM_-PPSA21402.rar") == 0);
+        assert(strcmp(output.partial, "/data/homebrew/_DLPSGAME.COM_-PPSA21402.rar.part") == 0);
+    }
     assert(rd_parse_url_batch("ftp://example/file", urls, 3) == -2);
     assert(rd_parse_url_batch("https://", urls, 3) == -2);
     assert(rd_parse_url_batch("http:///empty-host", urls, 3) == -2);
     assert(rd_parse_url_batch("https://example/1\nhttps://example/2", urls, 1) == -2);
     assert(strcmp(rd_job_state_name(RD_JOB_WAITING_FOR_SPACE), "waiting_for_space") == 0);
+    {
+        char directory[] = "/tmp/rd-output-test-XXXXXX";
+        char url[] = "https://host.example/archive.rar";
+        rd_output output;
+        struct stat st;
+        int output_fd;
+        assert(mkdtemp(directory) != NULL);
+        assert(rd_output_paths(&output, directory, url, 77) == 0);
+        output_fd = rd_output_create(&output);
+        assert(output_fd >= 0);
+        assert(write(output_fd, "partial", 7) == 7);
+        assert(close(output_fd) == 0);
+        assert(rd_output_discard(&output, 0) == 0);
+        assert(lstat(output.partial, &st) != 0 && errno == ENOENT);
+        output_fd = rd_output_create(&output);
+        assert(output_fd >= 0 && close(output_fd) == 0);
+        assert(rename(output.partial, output.final) == 0);
+        assert(rd_output_discard(&output, 1) == 0);
+        assert(lstat(output.final, &st) != 0 && errno == ENOENT);
+        {
+            char owner_directory[768];
+            snprintf(owner_directory, sizeof(owner_directory), "%s/.rd-partials", directory);
+            assert(rmdir(owner_directory) == 0);
+        }
+        assert(rmdir(directory) == 0);
+    }
     {
         char path[] = "/tmp/rd-queue-test-XXXXXX";
         int fd = mkstemp(path);
@@ -93,7 +132,7 @@ int main(void) {
         assert(q.count == 1 && strcmp(q.items[0].url, "http://legacy.example/file.bin") == 0);
         file = fopen(path, "r");
         assert(file != NULL && fgets(header, sizeof(header), file) != NULL);
-        assert(strcmp(header, "RDQ5\t2\n") == 0);
+        assert(strcmp(header, "RDQ6\t2\n") == 0);
         fclose(file);
         unlink(path);
     }

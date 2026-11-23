@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rd/http_client.h"
+#include "rd/output.h"
 
 #ifndef RD_HOST_BUILD
 
@@ -315,7 +316,7 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
     char current_url[RD_HTTP_PATH_MAX + RD_HTTP_HOST_MAX + 64U];
     char next_url[sizeof(current_url)];
     char location[RD_HTTP_LOCATION_MAX];
-    char final_path[768], part_path[784];
+    rd_output output;
     unsigned int redirect_count;
     size_t ca_count = 0;
     int net_pool = -1, ssl = -1, http = -1, template_id = -1;
@@ -336,13 +337,12 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
         set_error(error, error_capacity, "destination is missing or not writable");
         return -1;
     }
-    if (make_output_path(directory, input_url, item_id, final_path,
-                         sizeof(final_path), part_path, sizeof(part_path))) {
+    if (rd_output_paths(&output, directory, input_url, item_id) != 0) {
         set_error(error, error_capacity, "download filename or destination path is too long");
         return -1;
     }
-    if (lstat(final_path, &st) == 0 || errno != ENOENT ||
-        lstat(part_path, &st) == 0 || errno != ENOENT) {
+    if (lstat(output.final, &st) == 0 || errno != ENOENT ||
+        lstat(output.partial, &st) == 0 || errno != ENOENT) {
         set_error(error, error_capacity, "download output or partial file already exists");
         return -1;
     }
@@ -390,6 +390,7 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
         if (connection < 0) { set_error(error, error_capacity, "PS5 HTTP connection creation failed"); goto done; }
         request = sceHttpCreateRequestWithURL2(connection, "GET", current_url, 0);
         if (request < 0) { set_error(error, error_capacity, "PS5 HTTP request creation failed"); goto done; }
+        if (rd_http_set_handle(item_id, request) != 0) goto done;
         if (sceHttpAddRequestHeader(request, "Accept-Encoding", "identity", 0) != 0) {
             set_error(error, error_capacity, "could not request the original uncompressed file bytes");
             goto done;
@@ -422,6 +423,7 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
                 set_error(error, error_capacity, "refused HTTPS to HTTP redirect downgrade");
                 goto done;
             }
+            rd_http_set_handle(item_id, -1);
             (void)sceHttpDeleteRequest(request); request = -1;
             (void)sceHttpDeleteConnection(connection); connection = -1;
             strcpy(current_url, next_url);
@@ -450,7 +452,7 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
                 goto done;
             }
         }
-        output_fd = open(part_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        output_fd = rd_output_create(&output);
         if (output_fd < 0) { set_error(error, error_capacity, "cannot create partial output file"); goto done; }
         buffer = (unsigned char *)malloc(RD_SCE_IO_SIZE);
         if (!buffer) { set_error(error, error_capacity, "out of memory for download buffer"); goto done; }
@@ -488,7 +490,7 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
             goto done;
         }
         output_fd = -1;
-        if (lstat(final_path, &st) == 0 || errno != ENOENT || rename(part_path, final_path) != 0) {
+        if (lstat(output.final, &st) == 0 || errno != ENOENT || rename(output.partial, output.final) != 0) {
             set_error(error, error_capacity, "final file exists or could not be published atomically");
             goto done;
         }
@@ -496,6 +498,7 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
         goto done;
     }
 done:
+    rd_http_set_handle(item_id, -1);
     free(buffer);
     if (output_fd >= 0) close(output_fd);
     if (request >= 0) sceHttpDeleteRequest(request);
@@ -508,7 +511,7 @@ done:
     return result;
 }
 
-int rd_ps5_http_reset_partial(const char *input_url, const char *directory,
+int rd_ps5_http_reset_legacy_partial(const char *input_url, const char *directory,
                               unsigned long item_id) {
     char final_path[768], part_path[784];
     struct stat st;

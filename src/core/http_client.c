@@ -1,11 +1,13 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rd/http_client.h"
+#include "rd/output.h"
 
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <netdb.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,10 +22,50 @@
 int rd_ps5_http_download(const char *input_url, const char *directory,
                          unsigned long item_id, rd_http_progress_fn progress,
                          void *context, char *error, size_t error_capacity);
-int rd_ps5_http_reset_partial(const char *input_url, const char *directory,
+int rd_ps5_http_reset_legacy_partial(const char *input_url, const char *directory,
                               unsigned long item_id);
 #endif
 
+/* One transfer runs at a time. Unregister before closing a handle so a
+ * concurrent cancel cannot abort a recycled socket or SDK request ID. */
+static pthread_mutex_t handle_mutex = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long handle_job, cancelled_job;
+static int active_handle = -1;
+
+void rd_http_begin(unsigned long id) {
+    pthread_mutex_lock(&handle_mutex);
+    handle_job = id;
+    active_handle = -1;
+    cancelled_job = 0;
+    pthread_mutex_unlock(&handle_mutex);
+}
+
+int rd_http_set_handle(unsigned long id, int handle) {
+    int stopped;
+    pthread_mutex_lock(&handle_mutex);
+    handle_job = id;
+    active_handle = handle;
+    stopped = cancelled_job == id;
+    pthread_mutex_unlock(&handle_mutex);
+    return stopped ? -1 : 0;
+}
+
+#ifndef RD_HOST_BUILD
+int sceHttpAbortRequest(int request_id);
+#endif
+
+void rd_http_cancel(unsigned long id) {
+    pthread_mutex_lock(&handle_mutex);
+    cancelled_job = id;
+    if (handle_job == id && active_handle >= 0) {
+#ifdef RD_HOST_BUILD
+        (void)shutdown(active_handle, SHUT_RDWR);
+#else
+        (void)sceHttpAbortRequest(active_handle);
+#endif
+    }
+    pthread_mutex_unlock(&handle_mutex);
+}
 int rd_http_parse_url(const char *text, rd_http_url *url) {
     static const char scheme[] = "http://";
     const char *authority, *authority_end, *path, *fragment;
@@ -186,7 +228,7 @@ static int socket_send_all(int fd, const char *data, size_t length) {
     return 0;
 }
 
-static int connect_http(const rd_http_url *url) {
+static int connect_http(const rd_http_url *url, unsigned long id) {
     struct addrinfo hints, *addresses = NULL, *address;
     char service[8];
     int fd = -1;
@@ -207,7 +249,14 @@ static int connect_http(const rd_http_url *url) {
             (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
         }
 #endif
+        if (rd_http_set_handle(id, fd) != 0) {
+            (void)rd_http_set_handle(id, -1);
+            close(fd);
+            fd = -1;
+            break;
+        }
         if (connect(fd, address->ai_addr, address->ai_addrlen) == 0) break;
+        (void)rd_http_set_handle(id, -1);
         close(fd);
         fd = -1;
     }
@@ -445,8 +494,8 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
     char url_text[RD_HTTP_PATH_MAX + RD_HTTP_HOST_MAX + 32U];
     char redirect_url[sizeof(url_text)];
     char header_buffer[RD_HTTP_HEADER_LIMIT + 1U];
-    char filename[192], final_path[768], part_path[784];
-    rd_http_url url, filename_url;
+    rd_output output;
+    rd_http_url url;
     unsigned int redirects;
     int fd = -1, file_fd = -1, result = -1;
     struct stat st;
@@ -462,7 +511,6 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
         set_error(error, error_capacity, "only valid plain HTTP URLs are supported by this MVP transport");
         return -1;
     }
-    filename_url = url;
     strcpy(url_text, input_url);
     if (stat(directory, &st) != 0 || !S_ISDIR(st.st_mode) || access(directory, W_OK) != 0) {
         set_error(error, error_capacity, "destination is missing or not writable");
@@ -476,7 +524,7 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
         char host_header[RD_HTTP_HOST_MAX + 16U];
         size_t header_length;
         int request_length;
-        fd = connect_http(&url);
+        fd = connect_http(&url, item_id);
         if (fd < 0) { set_error(error, error_capacity, "DNS lookup or TCP connection failed"); goto done; }
         if (url.port == 80) snprintf(host_header, sizeof(host_header), "%s", url.host);
         else snprintf(host_header, sizeof(host_header), "%s:%u", url.host, (unsigned int)url.port);
@@ -487,18 +535,19 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
         if (request_length < 0 || (size_t)request_length >= sizeof(request) ||
             socket_send_all(fd, request, (size_t)request_length) != 0) {
             set_error(error, error_capacity, "failed to send HTTP request");
-            close(fd); fd = -1; goto done;
+            goto done;
         }
         reader.fd = fd; reader.position = 0; reader.available = 0;
         if (read_headers(&reader, header_buffer, sizeof(header_buffer), &header_length) != 0 ||
             rd_http_parse_response_headers(header_buffer, header_length, &headers) != 0) {
             set_error(error, error_capacity, "invalid or oversized HTTP response headers");
-            close(fd); fd = -1; goto done;
+            goto done;
         }
         if (headers.status_code == 301 || headers.status_code == 302 ||
             headers.status_code == 303 || headers.status_code == 307 || headers.status_code == 308) {
             int redirect_result;
-            close(fd); fd = -1;
+            rd_http_set_handle(item_id, -1);
+        close(fd); fd = -1;
             if (redirects == RD_HTTP_REDIRECT_LIMIT || !headers.location[0]) {
                 set_error(error, error_capacity, "too many redirects or missing Location header");
                 goto done;
@@ -518,55 +567,49 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
             char message[64];
             snprintf(message, sizeof(message), "server returned HTTP %d", headers.status_code);
             set_error(error, error_capacity, message);
-            close(fd); fd = -1; goto done;
+            goto done;
         }
-        if (make_filename(&filename_url, item_id, filename, sizeof(filename)) != 0 ||
-            snprintf(final_path, sizeof(final_path), "%s/%s", directory, filename) >= (int)sizeof(final_path) ||
-            snprintf(part_path, sizeof(part_path), "%s.part", final_path) >= (int)sizeof(part_path)) {
+        if (rd_output_paths(&output, directory, input_url, item_id) != 0) {
             set_error(error, error_capacity, "filename or output path is too long");
-            close(fd); fd = -1; goto done;
+            goto done;
         }
         if (headers.has_content_length && headers.content_length > 0) {
             unsigned long long block_size, available;
             if (statvfs(directory, &space) != 0) {
                 set_error(error, error_capacity, "cannot verify destination free space");
-                close(fd); fd = -1; goto done;
+                goto done;
             }
             block_size = space.f_frsize ? (unsigned long long)space.f_frsize :
                          (unsigned long long)space.f_bsize;
             if (block_size == 0 || space.f_bavail > ULLONG_MAX / block_size) {
                 set_error(error, error_capacity, "destination free-space value is invalid");
-                close(fd); fd = -1; goto done;
+                goto done;
             }
             available = (unsigned long long)space.f_bavail * block_size;
             if (available < headers.content_length ||
                 available - headers.content_length < RD_HTTP_SPACE_MARGIN) {
                 set_error(error, error_capacity, "not enough free space for file and safety margin");
-                close(fd); fd = -1; goto done;
+                goto done;
             }
         }
-        if (lstat(final_path, &st) == 0 || errno != ENOENT) {
+        if (lstat(output.final, &st) == 0 || errno != ENOENT) {
             set_error(error, error_capacity, "output file already exists; refusing to overwrite it");
-            close(fd); fd = -1; goto done;
+            goto done;
         }
-        file_fd = open(part_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        file_fd = rd_output_create(&output);
         if (file_fd < 0) {
             set_error(error, error_capacity, errno == EEXIST ?
                       "partial file already exists; preserving it" : "cannot create partial output file");
-            close(fd); fd = -1; goto done;
+            goto done;
         }
         if (progress && progress(0, headers.has_content_length ? headers.content_length : 0,
                                  context) != 0) {
             set_error(error, error_capacity, "download was stopped; partial file kept");
-            close(fd); fd = -1;
-            close(file_fd); file_fd = -1;
             goto done;
         }
         if (receive_to_file(&reader, file_fd, &headers, &received, progress, context) != 0 ||
             (headers.has_content_length && received != headers.content_length)) {
             set_error(error, error_capacity, "transfer interrupted or byte count did not match Content-Length; partial file kept");
-            close(fd); fd = -1;
-            close(file_fd); file_fd = -1;
             goto done;
         }
         {
@@ -575,11 +618,12 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
             file_fd = -1;
             if (sync_error != 0 || close_error != 0) {
             set_error(error, error_capacity, "could not safely flush downloaded file; partial file kept");
-            close(fd); fd = -1; goto done;
+            goto done;
             }
         }
+        rd_http_set_handle(item_id, -1);
         close(fd); fd = -1;
-        if (lstat(final_path, &st) == 0 || errno != ENOENT || rename(part_path, final_path) != 0) {
+        if (lstat(output.final, &st) == 0 || errno != ENOENT || rename(output.partial, output.final) != 0) {
             set_error(error, error_capacity, "final file exists or could not be atomically published; partial file kept");
             goto done;
         }
@@ -587,12 +631,13 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
         goto done;
     }
 done:
+    rd_http_set_handle(item_id, -1);
     if (fd >= 0) close(fd);
     if (file_fd >= 0) close(file_fd);
     return result;
 }
 
-int rd_http_reset_partial(const char *input_url, const char *directory, unsigned long item_id) {
+int rd_http_reset_legacy_partial(const char *input_url, const char *directory, unsigned long item_id) {
     rd_http_url url;
     char filename[192], final_path[768], part_path[784];
     struct stat st;
@@ -610,7 +655,7 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
     return rd_ps5_http_download(input_url, directory, item_id, progress,
                                 context, error, error_capacity);
 }
-int rd_http_reset_partial(const char *input_url, const char *directory, unsigned long item_id) {
-    return rd_ps5_http_reset_partial(input_url, directory, item_id);
+int rd_http_reset_legacy_partial(const char *input_url, const char *directory, unsigned long item_id) {
+    return rd_ps5_http_reset_legacy_partial(input_url, directory, item_id);
 }
 #endif
