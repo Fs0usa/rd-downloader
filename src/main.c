@@ -2,7 +2,7 @@
 #include <string.h>
 #include "rd/http_server.h"
 
-#define RD_DOWNLOADER_VERSION "1.0.0"
+#define RD_DOWNLOADER_VERSION "1.1.0-dev"
 
 #ifndef RD_HOST_BUILD
 typedef struct rd_notification_request {

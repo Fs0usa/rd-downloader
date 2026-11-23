@@ -1,5 +1,9 @@
 # RD Downloader 1.0.0 implementation status
 
+## Extraction data safety
+
+Extraction retains the downloaded archive and extracted members. RD Downloader does not approve overwriting existing destination files; a collision makes extraction stop without replacing the existing file. The helper stages each new member under a temporary `.wfm-part-*` name and atomically publishes it only after a successful write. On cancellation or failed writes, it removes only its own uncommitted temporary output. Compound archive handling can remove an intermediate container that the helper itself generated during that same extraction (such as a temporary joined split archive); it does not remove the source archive or unrelated destination files. The optional `.pkg` destination-root promotion copies with exclusive creation, leaves the extracted original in place, and skips an existing root target. Explicitly confirmed queue removal is a separate operation and is not triggered by successful extraction.
+
 ## Current code status (2026-11-23)
 
 This is the first major release checkpoint. The user confirmed direct HTTPS downloading and RAR extraction on the PS5. See [`CHANGELOG.md`](CHANGELOG.md) for the v1.0.0 scope and remaining limitations.

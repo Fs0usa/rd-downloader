@@ -6,7 +6,9 @@
 #include "rd/wfm_client.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -58,7 +60,7 @@ static int send_health(int fd) {
     pthread_mutex_unlock(&queue_mutex);
     length = snprintf(body, sizeof(body),
         "{\"status\":\"ok\",\"application\":\"rd-downloader\","
-        "\"version\":\"1.0.0\",\"transport\":\"http-https\","
+        "\"version\":\"1.1.0-dev\",\"transport\":\"http-https\","
         "\"worker_ready\":%s,\"downloader_active\":%s}\n",
         ready ? "true" : "false", active ? "true" : "false");
     if (length < 0 || (size_t)length >= sizeof(body)) return -1;
@@ -380,7 +382,38 @@ typedef struct rd_extraction_context {
     unsigned long long started_ms;
     unsigned long long previous_ms;
     unsigned long long previous_done;
+    size_t package_count;
+    int package_overflow;
+    char package_paths[64][512];
 } rd_extraction_context;
+
+static int is_package_path(const char *path) {
+    const char *base = strrchr(path, '/');
+    size_t length;
+    base = base ? base + 1 : path;
+    length = strlen(base);
+    return length >= 4U && base[length - 4U] == '.' &&
+        tolower((unsigned char)base[length - 3U]) == 'p' &&
+        tolower((unsigned char)base[length - 2U]) == 'k' &&
+        tolower((unsigned char)base[length - 1U]) == 'g';
+}
+
+static void remember_package_path(rd_extraction_context *context, const char *path) {
+    size_t i;
+    if (!path || !is_package_path(path)) return;
+    for (i = 0; i < context->package_count; ++i)
+        if (strcmp(context->package_paths[i], path) == 0) return;
+    if (context->package_count >= sizeof(context->package_paths) / sizeof(context->package_paths[0])) {
+        context->package_overflow = 1;
+        return;
+    }
+    if (strlen(path) >= sizeof(context->package_paths[0])) {
+        context->package_overflow = 1;
+        return;
+    }
+    snprintf(context->package_paths[context->package_count++],
+             sizeof(context->package_paths[0]), "%s", path);
+}
 
 static int record_extraction_progress(uint64_t done, uint64_t total,
                                       const char *current_file, void *opaque) {
@@ -394,8 +427,11 @@ static int record_extraction_progress(uint64_t done, uint64_t total,
         if (item->id != context->id) continue;
         if (item->state == RD_JOB_CANCELLED) break;
         if (item->state != RD_JOB_EXTRACTING) break;
-        if (current_file) copy_display_text(item->extraction_current_file,
-                                            sizeof(item->extraction_current_file), current_file);
+        if (current_file) {
+            copy_display_text(item->extraction_current_file,
+                              sizeof(item->extraction_current_file), current_file);
+            remember_package_path(context, current_file);
+        }
         else {
             item->extraction_done_bytes = done;
             item->extraction_total_bytes = total;
@@ -429,6 +465,92 @@ static int extraction_cancel_requested(void *opaque) {
     }
     pthread_mutex_unlock(&queue_mutex);
     return cancelled;
+}
+
+static int safe_relative_member(const char *path) {
+    const char *segment;
+    if (!path || !*path || path[0] == '/') return 0;
+    segment = path;
+    for (;;) {
+        const char *slash = strchr(segment, '/');
+        size_t length = slash ? (size_t)(slash - segment) : strlen(segment);
+        if (!length || (length == 1U && segment[0] == '.') ||
+            (length == 2U && segment[0] == '.' && segment[1] == '.')) return 0;
+        if (!slash) return 1;
+        segment = slash + 1;
+    }
+}
+
+static int copy_package_without_overwrite(const char *source, const char *target,
+                                          rd_extraction_context *context) {
+    struct stat before, opened;
+    unsigned char buffer[64U * 1024U];
+    int input = -1, output = -1, created = 0, result = -1;
+    if (lstat(source, &before) != 0 || !S_ISREG(before.st_mode)) return -1;
+    input = open(source, O_RDONLY
+#ifdef O_NOFOLLOW
+                 | O_NOFOLLOW
+#endif
+    );
+    if (input < 0 || fstat(input, &opened) != 0 || !S_ISREG(opened.st_mode) ||
+        before.st_dev != opened.st_dev || before.st_ino != opened.st_ino) goto done;
+    output = open(target, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (output < 0) goto done;
+    created = 1;
+    for (;;) {
+        ssize_t count;
+        size_t written = 0;
+        if (extraction_cancel_requested(context)) { errno = ECANCELED; goto done; }
+        count = read(input, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) goto done;
+        if (count == 0) break;
+        while (written < (size_t)count) {
+            ssize_t n = write(output, buffer + written, (size_t)count - written);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) goto done;
+            written += (size_t)n;
+        }
+    }
+    if (fchmod(output, before.st_mode & 0777) != 0 || fsync(output) != 0) goto done;
+    if (close(output) != 0) { output = -1; goto done; }
+    output = -1;
+    result = 0;
+done:
+    if (input >= 0) close(input);
+    if (output >= 0) close(output);
+    if (result != 0 && created) unlink(target);
+    return result;
+}
+
+static void promote_extracted_packages(rd_extraction_context *context,
+                                       const char *destination,
+                                       char *warning, size_t warning_capacity) {
+    size_t i;
+    unsigned int failed = context->package_overflow ? 1U : 0U;
+    warning[0] = '\0';
+    for (i = 0; i < context->package_count; ++i) {
+        const char *relative = context->package_paths[i];
+        const char *base;
+        char source[1024], target[1024];
+        int n;
+        if (!safe_relative_member(relative)) { ++failed; continue; }
+        base = strrchr(relative, '/');
+        base = base ? base + 1 : relative;
+        n = snprintf(source, sizeof(source), "%s/%s", destination, relative);
+        if (n < 0 || (size_t)n >= sizeof(source)) { ++failed; continue; }
+        n = snprintf(target, sizeof(target), "%s/%s", destination, base);
+        if (n < 0 || (size_t)n >= sizeof(target)) { ++failed; continue; }
+        if (strcmp(source, target) == 0) continue;
+        if (copy_package_without_overwrite(source, target, context) != 0) {
+            if (errno == ECANCELED) return;
+            ++failed;
+        }
+    }
+    if (failed)
+        snprintf(warning, warning_capacity,
+                 "%u .pkg file(s) could not be copied to the destination folder; extracted originals were preserved",
+                 failed);
 }
 
 static int queue_has_pending_downloads(void) {
@@ -515,6 +637,7 @@ static void *download_worker(void *unused) {
         rd_progress_context progress;
         rd_extraction_context extraction_progress;
         char error[256];
+        char package_warning[256] = "";
 
         pthread_mutex_lock(&queue_mutex);
         for (;;) {
@@ -565,15 +688,17 @@ static void *download_worker(void *unused) {
         pthread_mutex_unlock(&queue_mutex);
 
         if (extracting) {
+            memset(&extraction_progress, 0, sizeof(extraction_progress));
             extraction_progress.id = id;
             extraction_progress.started_ms = monotonic_ms();
-            extraction_progress.previous_ms = 0;
-            extraction_progress.previous_done = 0;
             error[0] = '\0';
             result = rd_wfm_extract(id, archive_path, extraction_destination, password,
                                     record_extraction_progress, extraction_cancel_requested,
                                     &extraction_progress,
                                     error, sizeof(error));
+            if (result == 0)
+                promote_extracted_packages(&extraction_progress, extraction_destination,
+                                           package_warning, sizeof(package_warning));
             memset(password, 0, sizeof(password));
             pthread_mutex_lock(&queue_mutex);
             active_extraction_id = 0;
@@ -584,7 +709,12 @@ static void *download_worker(void *unused) {
                     (void)rd_queue_remove(&server_queue, id);
                     break;
                 }
-                if (result == 0) complete_archive_set(item);
+                if (result == 0) {
+                    complete_archive_set(item);
+                    if (package_warning[0])
+                        (void)rd_queue_update(&server_queue, id, RD_JOB_COMPLETED,
+                            item->downloaded_bytes, item->expected_bytes, package_warning);
+                }
                 else {
                     (void)rd_queue_update(&server_queue, id, RD_JOB_READY_TO_EXTRACT,
                         item->downloaded_bytes, item->expected_bytes,
