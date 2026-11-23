@@ -79,7 +79,7 @@ static const char index_body[] =
     "<p class=\"row\"><input id=\"extract\" type=\"checkbox\" checked><label for=\"extract\">Extract archives after download</label></p>"
     "<small>Archive extraction is not active in this build; archive jobs will wait for helper integration.</small>"
     "<label for=\"password\">Archive password <span class=\"muted\">(optional)</span></label>"
-    "<input id=\"password\" type=\"text\" spellcheck=\"false\" autocapitalize=\"none\" maxlength=\"255\" autocomplete=\"off\" placeholder=\"Leave blank if not needed\">"
+    "<input id=\"password\" type=\"text\" spellcheck=\"false\" autocapitalize=\"off\" autocorrect=\"off\" maxlength=\"255\" autocomplete=\"off\" placeholder=\"Leave blank if not needed\">"
     "<p class=\"error\" id=\"modalMessage\" role=\"status\"></p><button id=\"confirm\">Start download</button> "
     "<button id=\"abort\" type=\"button\">Cancel</button></div></div>"
     "<script>"
@@ -120,13 +120,17 @@ static const char index_body[] =
     "'Content-Type':'text/plain'},cache:'no-store'});const t=await r.text();if(!r.ok)throw Error(t||'Request failed');"
     "msg.textContent='';if(path==='/api/queue')document.querySelector('#urls').value='';await refresh()}"
     "catch(e){msg.textContent=e instanceof TypeError?offlineMessage():e.message}}"
-    "const modal=document.querySelector('#modal');document.querySelector('#add').onclick=()=>{if(document.querySelector('#urls').value.trim()){"
-    "document.querySelector('#modalMessage').textContent='';modal.classList.remove('hidden')}};"
-    "document.querySelector('#abort').onclick=()=>{modal.classList.add('hidden');document.querySelector('#password').value=''};"
+    "const modal=document.querySelector('#modal'),password=document.querySelector('#password');"
+    "const savedPassword={get(){try{return localStorage.getItem('rd.archivePassword')||''}catch(e){return ''}},"
+    "set(v){try{if(v)localStorage.setItem('rd.archivePassword',v);else localStorage.removeItem('rd.archivePassword')}catch(e){}}};"
+    "password.addEventListener('input',()=>savedPassword.set(password.value));"
+    "document.querySelector('#add').onclick=()=>{if(document.querySelector('#urls').value.trim()){"
+    "document.querySelector('#modalMessage').textContent='';password.value=savedPassword.get();modal.classList.remove('hidden')}};"
+    "document.querySelector('#abort').onclick=()=>{modal.classList.add('hidden')};"
     "document.querySelector('#confirm').onclick=async()=>{const b=document.querySelector('#urls').value.trim();if(!b)return;"
-    "const headers={'X-RD-Command':'1','X-RD-Extract':document.querySelector('#extract').checked?'1':'0','Content-Type':'text/plain'};"
-    "const pw=document.querySelector('#password').value;if(pw)headers['X-RD-Password']=pw;try{const r=await fetch('/api/queue',{method:'POST',body:b,headers,cache:'no-store'});"
-    "const t=await r.text();if(!r.ok)throw Error(t||'Request failed');document.querySelector('#urls').value='';document.querySelector('#password').value='';"
+    "const form=new URLSearchParams();form.set('urls',b);form.set('extract',document.querySelector('#extract').checked?'1':'0');form.set('password',password.value);"
+    "const headers={'X-RD-Command':'1','Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'};try{const r=await fetch('/api/add',{method:'POST',body:form,headers,cache:'no-store'});"
+    "const t=await r.text();if(!r.ok)throw Error(t||'Request failed');document.querySelector('#urls').value='';"
     "modal.classList.add('hidden');msg.textContent='';await refresh()}catch(e){document.querySelector('#modalMessage').textContent=e.message}};"
     "refresh();setInterval(refresh,2500);"
     "</script></body></html>\n";
@@ -241,6 +245,61 @@ static int copy_header_value(const char *request, const char *name, char *out, s
     memcpy(out, value, length);
     out[length] = '\0';
     return 1;
+}
+
+static int form_hex(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int decode_form_value(const char *src, size_t length, char *out, size_t capacity,
+                             int allow_newlines) {
+    size_t i, used = 0;
+    for (i = 0; i < length; ++i) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '+') c = ' ';
+        else if (c == '%') {
+            int hi, lo;
+            if (i + 2 >= length || (hi = form_hex((unsigned char)src[i + 1])) < 0 ||
+                (lo = form_hex((unsigned char)src[i + 2])) < 0) return -1;
+            c = (unsigned char)((hi << 4) | lo);
+            i += 2;
+        }
+        if (c == 0 || (c < 0x20 && !(allow_newlines && (c == '\n' || c == '\r'))) || c == 0x7f ||
+            used + 1 >= capacity) return -1;
+        out[used++] = (char)c;
+    }
+    out[used] = '\0';
+    return 0;
+}
+
+static int parse_add_form(const char *body, size_t length, char *urls, size_t urls_capacity,
+                          char *extract, size_t extract_capacity,
+                          char *password, size_t password_capacity) {
+    size_t offset = 0;
+    int have_urls = 0, have_extract = 0, have_password = 0;
+    while (offset < length) {
+        size_t end = offset, equal;
+        char key[16];
+        while (end < length && body[end] != '&') ++end;
+        equal = offset;
+        while (equal < end && body[equal] != '=') ++equal;
+        if (decode_form_value(body + offset, equal - offset, key, sizeof(key), 0) != 0) return -1;
+        if (strcmp(key, "urls") == 0) {
+            if (have_urls++ || equal == end || decode_form_value(body + equal + 1, end - equal - 1,
+                urls, urls_capacity, 1) != 0) return -1;
+        } else if (strcmp(key, "extract") == 0) {
+            if (have_extract++ || equal == end || decode_form_value(body + equal + 1, end - equal - 1,
+                extract, extract_capacity, 0) != 0) return -1;
+        } else if (strcmp(key, "password") == 0) {
+            if (have_password++ || equal == end || decode_form_value(body + equal + 1, end - equal - 1,
+                password, password_capacity, 0) != 0) return -1;
+        } else return -1;
+        offset = end + 1;
+    }
+    return have_urls && have_extract && have_password ? 0 : -1;
 }
 
 static int send_queue(int fd) {
@@ -495,18 +554,20 @@ static void handle_client(int fd) {
                 pthread_mutex_unlock(&queue_mutex);
                 (void)send_queue(fd);
             }
-        } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/queue") == 0) {
+        } else if (strcmp(method, "POST") == 0 &&
+                   (strcmp(path, "/api/queue") == 0 || strcmp(path, "/api/add") == 0)) {
             char urls[4][RD_MAX_URL_LENGTH];
             char password[RD_PASSWORD_HEADER_MAX] = "";
             char extract_setting[8] = "1";
+            char url_batch[RD_HTTP_MAX_BODY + 1U];
             int extract_enabled = 1;
+            int form_request = strcmp(path, "/api/add") == 0;
             int count;
             size_t received;
             body_offset = (size_t)((end_headers + 4) - request);
             if (!command_header_ok(request) || body_length == 0 ||
-                copy_header_value(request, "X-RD-Extract", extract_setting, sizeof(extract_setting)) < 0 ||
-                copy_header_value(request, "X-RD-Password", password, sizeof(password)) < 0 ||
-                (strcmp(extract_setting, "0") != 0 && strcmp(extract_setting, "1") != 0) ||
+                (!form_request && (copy_header_value(request, "X-RD-Extract", extract_setting, sizeof(extract_setting)) < 0 ||
+                copy_header_value(request, "X-RD-Password", password, sizeof(password)) < 0)) ||
                 body_offset + body_length > RD_HTTP_MAX_REQUEST) {
                 static const char error_body[] = "invalid queue options or URL body\n";
                 (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
@@ -523,18 +584,41 @@ static void handle_client(int fd) {
                 received += (size_t)got;
             }
             if (memchr(request + body_offset, '\0', body_length) != NULL) {
-                static const char error_body[] = "URL body contains a NUL byte\n";
+                static const char error_body[] = "request body contains a NUL byte\n";
                 (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
                                     error_body, sizeof(error_body) - 1U);
                 return;
             }
             request[body_offset + body_length] = '\0';
+            if (form_request) {
+                if (parse_add_form(request + body_offset, body_length, url_batch, sizeof(url_batch),
+                                   extract_setting, sizeof(extract_setting), password, sizeof(password)) != 0) {
+                    static const char error_body[] = "invalid add form\n";
+                    (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
+                                        error_body, sizeof(error_body) - 1U);
+                    return;
+                }
+            } else {
+                if (body_length >= sizeof(url_batch)) {
+                    static const char error_body[] = "URL batch is too large\n";
+                    (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
+                                        error_body, sizeof(error_body) - 1U);
+                    return;
+                }
+                memcpy(url_batch, request + body_offset, body_length + 1U);
+            }
+            if (strcmp(extract_setting, "0") != 0 && strcmp(extract_setting, "1") != 0) {
+                static const char error_body[] = "invalid extraction option\n";
+                (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
+                                    error_body, sizeof(error_body) - 1U);
+                return;
+            }
             if (!queue_ready || !worker_started) {
                 static const char error_body[] = "download worker or queue unavailable\n";
                 (void)send_response(fd, 503, "Service Unavailable", "text/plain", error_body, sizeof(error_body)-1);
                 return;
             }
-            count = rd_parse_url_batch(request + body_offset, urls, 4);
+            count = rd_parse_url_batch(url_batch, urls, 4);
             extract_enabled = strcmp(extract_setting, "1") == 0;
             if (count <= 0) {
                 static const char error_body[] = "invalid URL batch (maximum 4 URLs per request)\n";

@@ -28,14 +28,14 @@ The workflow above describes the goal, not the current feature set.
 - certificate validation using an embedded Debian Mozilla-derived CA bundle; HTTP-to-HTTPS redirects are followed and HTTPS-to-HTTP downgrade redirects are refused;
 - UI progress, status and error reporting, with queue mutation protected from cross-origin browser requests by a required custom header.
 
-The working tree adds a visible optional-password field, immediate start after confirmation, a second-confirmation stop/remove action, partial-file cleanup, URL-derived output names without the old `rd-{id}-` prefix, and speed/average/ETA display. These changes pass host tests and cross-compile, but are not yet validated on the console. Additional files run sequentially. Pause is cooperative at progress callback boundaries; retry starts at byte zero; payload restart does not resume a transfer. Removing a completed queue entry leaves its final file.
+The working tree adds a visible optional-password field, remembers it in browser `localStorage` under `rd.archivePassword`, and sends it to `POST /api/add` with the URL batch. The server keeps it only in process memory and omits it from API responses and queue persistence. It also starts downloads immediately after confirmation, requires a second confirmation to stop/remove, cleans owned partial files, uses URL-derived output names without the old `rd-{id}-` prefix, and displays speed/average/ETA. These changes pass host tests and cross-compile, but are not yet validated on the console. Additional files run sequentially. Pause is cooperative at progress callback boundaries; retry starts at byte zero; payload restart does not resume a transfer. Removing a completed queue entry leaves its final file.
 
-Still missing: WFM extraction IPC (the toggle saves the choice and archive jobs report `ready_to_extract`; nothing is extracted), range/parallel downloads, retry backoff, Real-Debrid, destination selection, USB discovery and storage wait/recovery. The password stays in process memory and is not currently consumed by an extractor. Output names use a sanitized URL basename; HTTP `Content-Disposition` is not read.
+Still missing: WFM extraction IPC (the toggle saves the choice and archive jobs report `ready_to_extract`; nothing is extracted), range/parallel downloads, retry backoff, Real-Debrid, destination selection, USB discovery and storage wait/recovery. The password reaches the backend in process memory but is not currently consumed by an extractor. Output names use a sanitized URL basename; HTTP `Content-Disposition` is not read.
 
 ## Queue API
 
 - `GET /api/queue` returns filenames, states, byte counts, speed/ETA and safe errors. It omits URLs and passwords.
-- `POST /api/queue` accepts up to four newline-separated HTTP or HTTPS URLs and starts the worker immediately. The dashboard sends `X-RD-Command: 1`, `X-RD-Extract: 0|1`, and the optional `X-RD-Password` header.
+- `POST /api/add` accepts URL-encoded `urls`, `extract`, and `password` fields and starts the worker immediately. The older `POST /api/queue` newline-body interface remains supported.
 - `POST /api/start` remains available to wake queued jobs. Include `X-RD-Command: 1`.
 - `DELETE /api/queue/{id}` removes an item. On an active transfer it aborts the request, deletes the owned partial file after worker cleanup, and removes the queue entry. The dashboard requires a second confirmation. Removing a completed item keeps its file.
 
