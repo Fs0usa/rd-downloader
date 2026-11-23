@@ -58,7 +58,7 @@ static int send_health(int fd) {
     pthread_mutex_unlock(&queue_mutex);
     length = snprintf(body, sizeof(body),
         "{\"status\":\"ok\",\"application\":\"rd-downloader\","
-        "\"version\":\"0.3.0-https-dev\",\"transport\":\"http-https\","
+        "\"version\":\"1.0.0\",\"transport\":\"http-https\","
         "\"worker_ready\":%s,\"downloader_active\":%s}\n",
         ready ? "true" : "false", active ? "true" : "false");
     if (length < 0 || (size_t)length >= sizeof(body)) return -1;

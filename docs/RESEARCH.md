@@ -99,8 +99,12 @@ The project now compiles the PS5 transport in `src/core/ps5_http_client.c`, link
 
 The `0xA5` option interpretation is based on reverse-engineered PS4/HTTP behavior documentation (server validation, common-name validation, known CA, and SNI), not an official PS5 public header. The user later confirmed that one HTTPS sample completed on their PS5; this is real-hardware evidence for that tested URL, not broad TLS coverage. Host tests cannot validate PS5 TLS. [HTTP option reference](https://yharnam-hunters.github.io/byrgenwerth-site/runtime-reference/).
 
-The prior user report that the payload stopped when a download started also matched a 64 KiB default pthread stack in PS5-focused community code. The project moved large queue copies to the heap and now requests a 1 MiB stack for the persistent worker. This is a process-level worker setting; it makes no kernel or firmware changes. The corrected stack size and the HTTPS path both still require on-console validation.
+The prior user report that the payload stopped when a download started also matched a 64 KiB default pthread stack in PS5-focused community code. The project moved large queue copies to the heap and now requests a 1 MiB stack for the persistent worker. This is a process-level worker setting; it makes no kernel or firmware changes. The user subsequently confirmed the direct HTTPS download and RAR extraction flow on-console; other transfer sizes and failure cases remain untested.
 
 ### On-console HTTPS checkpoint
 
 On 2026-11-23, the user confirmed the sample HTTPS RAR downloaded successfully on their PS5 with build `0.3.0-https-dev`. This validates one real HTTPS transfer and the TLS/redirect path for that URL on the user's console. It does not establish coverage for every CA chain, redirect host, interrupted transfer, or large file. The tested source is checkpointed in Git as `working-https-v0.3.0`.
+
+### v1.0.0 PS5 extraction checkpoint
+
+On 2026-11-23, the user also confirmed that a downloaded RAR extracted correctly on the PS5 while the WFM helper payload was active in Payload Manager. This verifies the implemented download-to-helper-to-extracted-files path for that archive. It does not verify multipart archives, encrypted/password-protected archives, restart recovery, or all archive layouts. The first major release checkpoint is tagged `v1.0.0`; scope and limitations are listed in [`CHANGELOG.md`](CHANGELOG.md).
