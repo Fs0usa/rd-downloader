@@ -2,7 +2,7 @@
 #include <string.h>
 #include "rd/http_server.h"
 
-#define RD_DOWNLOADER_VERSION "0.2.1-dev"
+#define RD_DOWNLOADER_VERSION "0.3.0-dev"
 
 #ifndef RD_HOST_BUILD
 typedef struct rd_notification_request {
@@ -29,7 +29,7 @@ main(void)
 
     memset(&request, 0, sizeof(request));
     snprintf(request.message, sizeof(request.message),
-             "RD Downloader %s: web service starting on port %d; HTTP-only downloads",
+             "RD Downloader %s: web service starting on port %d; HTTP/HTTPS downloads",
              RD_DOWNLOADER_VERSION, RD_HTTP_DEFAULT_PORT);
 
     (void)sceKernelSendNotificationRequest(0, &request, sizeof(request), 0);

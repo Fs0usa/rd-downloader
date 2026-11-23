@@ -24,14 +24,14 @@ typedef struct rd_http_response_headers {
 typedef int (*rd_http_progress_fn)(unsigned long long downloaded,
                                    unsigned long long total, void *context);
 
-/* MVP transport parser: plain HTTP only; rejects userinfo and IPv6 literals. */
+/* Host-socket transport parser: plain HTTP only; rejects userinfo and IPv6 literals. */
 int rd_http_parse_url(const char *text, rd_http_url *url);
 
 /* Parse a complete, NUL-terminated header block (including CRLF CRLF). */
 int rd_http_parse_response_headers(const char *text, size_t length,
                                    rd_http_response_headers *headers);
 
-/* Sequential HTTP/1.0/1.1 download. HTTPS is intentionally rejected. */
+/* Sequential download; PS5 builds use libSceHttp/libSceSsl, host tests use sockets. */
 int rd_http_download(const char *url, const char *directory, unsigned long item_id,
                      rd_http_progress_fn progress, void *context,
                      char *error, size_t error_capacity);

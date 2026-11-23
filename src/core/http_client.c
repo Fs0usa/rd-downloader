@@ -16,6 +16,12 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#ifndef RD_HOST_BUILD
+int rd_ps5_http_download(const char *input_url, const char *directory,
+                         unsigned long item_id, rd_http_progress_fn progress,
+                         void *context, char *error, size_t error_capacity);
+#endif
+
 int rd_http_parse_url(const char *text, rd_http_url *url) {
     static const char scheme[] = "http://";
     const char *authority, *authority_end, *path, *fragment;
@@ -140,6 +146,7 @@ int rd_http_parse_response_headers(const char *text, size_t length,
     return 0;
 }
 
+#ifdef RD_HOST_BUILD
 #define RD_HTTP_HEADER_LIMIT 16384U
 #define RD_HTTP_IO_SIZE 65536U
 #define RD_HTTP_REDIRECT_LIMIT 5U
@@ -581,3 +588,11 @@ done:
     if (file_fd >= 0) close(file_fd);
     return result;
 }
+#else
+int rd_http_download(const char *input_url, const char *directory, unsigned long item_id,
+                     rd_http_progress_fn progress, void *context,
+                     char *error, size_t error_capacity) {
+    return rd_ps5_http_download(input_url, directory, item_id, progress,
+                                context, error, error_capacity);
+}
+#endif

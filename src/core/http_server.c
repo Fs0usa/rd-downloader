@@ -54,11 +54,11 @@ static const char index_body[] =
     ".error{color:#ff9a9a;min-height:1.4em}.joberror{color:#ff9a9a}small{color:#aaa1b8}"
     ".backend{font-size:.9rem;margin-top:8px}.online{color:#8de0a4}.offline{color:#ff9a9a}"
     "</style></head><body><header><h1>RD Downloader</h1>"
-    "<div class=\"muted\">PS5 downloads · plain HTTP only</div>"
+    "<div class=\"muted\">PS5 downloads · direct HTTP and HTTPS</div>"
     "<div id=\"backend\" class=\"backend offline\" role=\"status\">Checking PS5 service…</div></header>"
-    "<section class=\"card\"><label for=\"urls\"><strong>Add direct HTTP links</strong></label>"
-    "<p class=\"muted\">Paste one link per line. HTTPS downloads are not enabled yet.</p>"
-    "<textarea id=\"urls\" placeholder=\"http://example.com/file.zip\"></textarea>"
+    "<section class=\"card\"><label for=\"urls\"><strong>Add direct download links</strong></label>"
+    "<p class=\"muted\">Paste one HTTP or HTTPS link per line.</p>"
+    "<textarea id=\"urls\" placeholder=\"https://example.com/file.zip\"></textarea>"
     "<p><button id=\"add\">Add to queue</button> <button id=\"start\">Start queued downloads</button></p>"
     "<div id=\"message\" class=\"error\" role=\"status\"></div>"
     "</section><section class=\"card\"><strong>Queue</strong><ul id=\"queue\"></ul>"
@@ -72,7 +72,7 @@ static const char index_body[] =
     "async function refresh(){try{const r=await fetch('/api/queue',{cache:'no-store'});"
     "if(!r.ok)throw Error('PS5 service returned HTTP '+r.status);const d=await r.json();"
     "const backend=document.querySelector('#backend');backend.className='backend online';"
-    "backend.textContent='PS5 service online · HTTP-only downloader';"
+    "backend.textContent='PS5 service online · HTTP and HTTPS downloader';"
     "list.replaceChildren();empty.hidden=d.items.length>0;"
     "for(const item of d.items){const li=document.createElement('li'),label=document.createElement('div'),"
     "state=document.createElement('span'),remove=document.createElement('button'),bar=document.createElement('progress'),"
@@ -93,8 +93,6 @@ static const char index_body[] =
     "msg.textContent='';if(path==='/api/queue')document.querySelector('#urls').value='';await refresh()}"
     "catch(e){msg.textContent=e instanceof TypeError?offlineMessage():e.message}}"
     "document.querySelector('#add').onclick=()=>{const b=document.querySelector('#urls').value.trim();"
-    "if(b.split(String.fromCharCode(10)).some(x=>x.trim().toLowerCase().startsWith('https://')))"
-    "{msg.textContent='This build supports http:// links only; HTTPS support is not ready.';return}"
     "if(b)command('/api/queue','POST',b)};"
     "document.querySelector('#start').onclick=()=>{if(document.querySelector('#urls').value.trim())"
     "{msg.textContent='Add the links to the queue first, then press Start.';return}"
@@ -116,7 +114,7 @@ static int send_health(int fd) {
     pthread_mutex_unlock(&queue_mutex);
     length = snprintf(body, sizeof(body),
         "{\"status\":\"ok\",\"application\":\"rd-downloader\","
-        "\"version\":\"0.2.1-worker-stack-guard\",\"transport\":\"http-only\","
+        "\"version\":\"0.3.0-https-dev\",\"transport\":\"http-https\","
         "\"worker_ready\":%s,\"downloader_active\":%s}\n",
         ready ? "true" : "false", active ? "true" : "false");
     if (length < 0 || (size_t)length >= sizeof(body)) return -1;
@@ -415,16 +413,7 @@ static void handle_client(int fd) {
                 (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
                                     error_body, sizeof(error_body) - 1U);
             } else {
-                int add_result, https_unsupported = 0;
-                size_t i;
-                for (i = 0; i < (size_t)count; ++i)
-                    if (strncasecmp(urls[i], "https://", 8U) == 0) https_unsupported = 1;
-                if (https_unsupported) {
-                    static const char error_body[] = "HTTPS is not supported by this MVP build; use an http:// link\n";
-                    (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
-                                        error_body, sizeof(error_body) - 1U);
-                    return;
-                }
+                int add_result;
                 pthread_mutex_lock(&queue_mutex);
                 add_result = rd_queue_add_batch(&server_queue,
                     (const char (*)[RD_MAX_URL_LENGTH])urls, (size_t)count);

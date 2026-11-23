@@ -13,7 +13,7 @@ Native, single-user PS5 payload for queued direct-link downloads, optional Real-
 
 ## Current implementation status
 
-**Early direct-HTTP MVP candidate; not yet verified on the PS5.** The user confirmed the earlier HTTP service and persisted queue on-console. The current un-deployed build adds a sequential HTTP download worker and mobile queue page. Current code includes:
+**Early direct-link download candidate; HTTPS is implemented for target builds but not yet verified on the PS5.** The user confirmed the earlier HTTP service and persisted queue on-console. The current build adds a sequential downloader and mobile queue page. Current code includes:
 
 - PS5 Payload SDK build target;
 - byte-range planner;
@@ -22,21 +22,22 @@ Native, single-user PS5 payload for queued direct-link downloads, optional Real-
 - host tests for those primitives;
 - a bounded HTTP service and mobile-first queue page;
 - an atomic, versioned queue file that preserves job state and progress checkpoints across payload restarts;
-- one explicit-start, single-worker HTTP/1.x download path with redirects, streaming writes, size checks and atomic publication;
+- one explicit-start, single-worker download path with redirects, streaming writes, size checks and atomic publication; PS5 builds use `libSceHttp`/`libSceSsl`, host builds retain the POSIX HTTP test transport;
+- certificate validation using an embedded Debian Mozilla-derived CA bundle; HTTP-to-HTTPS redirects are followed and HTTPS-to-HTTP downgrade redirects are refused;
 - UI progress, status and error reporting, with queue mutation protected from cross-origin browser requests by a required custom header.
 
-Still missing: HTTPS/TLS, retry and resume, parallel/range downloads, Real-Debrid, archive extraction, configurable storage destinations, and PS5 runtime validation of the new worker. The downloader deliberately refuses HTTPS until a safe transport is verified. Interrupted `.part` files are preserved; they are not resumed yet.
+Still missing: real PS5 validation of HTTPS certificates, downloads and redirects; retry and resume; parallel/range downloads; Real-Debrid; archive extraction; and configurable storage destinations. Interrupted `.part` files are preserved; they are not resumed yet.
 
 ## Queue API (early backend)
 
 - `GET /api/queue` returns persisted item IDs, states, byte counts and safe error messages. It deliberately omits URLs because URLs may contain private query tokens.
-- `POST /api/queue` accepts up to four newline-separated plain HTTP URLs as a `text/plain` body. Include `X-RD-Command: 1`. HTTPS is rejected before it enters the queue until a safe TLS transport is implemented.
+- `POST /api/queue` accepts up to four newline-separated HTTP or HTTPS URLs as a `text/plain` body. Include `X-RD-Command: 1`.
 - `POST /api/start` starts queued jobs, only after an explicit user action. Include `X-RD-Command: 1`.
 - `DELETE /api/queue/{id}` removes an item. Include `X-RD-Command: 1`.
 
 The custom header makes browser cross-origin requests require a CORS preflight, which this server does not allow. This is a CSRF mitigation for the same-origin dashboard, not user authentication; use the service only on a trusted local network. The PS5 stores queue data at `/data/rd-downloader-queue.db` with mode 0600 and atomic replacement; Linux host mode uses `/tmp/rd-downloader-host-queue.db`. Earlier queue storage was confirmed on-console; the new format migration and download worker have not been tried on-console. Queue insertion does not start downloads; press **Start queued downloads** after reviewing/removing old test items.
 
-The first downloader build supports plain `http://` only. It requests identity encoding, follows up to five HTTP redirects, writes a bounded stream to a unique `.part` file under `/data/homebrew`, checks known `Content-Length` against free space plus a 16 MiB reserve, flushes the file, and renames it only after a complete response. It refuses to overwrite an existing result or stale `.part` file. Unknown-length transfers have no preflight estimate. If the payload restarts during a transfer, the job becomes failed and its partial file remains; automatic resume is not implemented.
+The PS5 transport uses `libSceHttp` with explicit TLS verification options and an embedded CA bundle generated from Debian's `ca-certificates` package. It follows up to five redirects, refuses HTTPS-to-HTTP redirects, writes a bounded stream to a unique `.part` file under `/data/homebrew`, checks known `Content-Length` against free space plus a 16 MiB reserve, flushes the file, and renames it only after a complete response. It refuses to overwrite an existing result or stale `.part` file. Unknown-length transfers have no preflight estimate. If the payload restarts during a transfer, the job becomes failed and its partial file remains; automatic resume is not implemented. Host builds retain the POSIX HTTP path and do not exercise PS5 TLS.
 
 ### Small PS5 download smoke test
 

@@ -33,7 +33,7 @@ No local Git history is available: the ZIP contains an empty `.git` directory, n
 
 The dependency-free socket server serves `/`, `/api/health`, and the mobile queue UI. Linux mode binds to `127.0.0.1`; PS5 mode binds to `0.0.0.0:8090`. The user confirmed LAN access and an earlier queue file persisted across the prior build. The current queue file is versioned and migrated atomically from that earlier format. The PS5 state path is `/data/rd-downloader-queue.db`. The new UI adds links, displays state/progress/error, supports removal, and requires an explicit Start action.
 
-The current un-deployed build adds a single sequential plain-HTTP worker. It uses bounded streaming socket reads, handles known-length and chunked bodies, follows up to five HTTP redirects, checks known-size free space with a 16 MiB reserve, and publishes only after `fsync` and successful completion. It writes uniquely named files in `/data/homebrew`, refuses existing files and preserves partial files. The browser can close without stopping a transfer. Host parser/queue tests and PS5 cross-compilation pass; actual PS5 downloads, destination writability, pthread behavior, and database migration are not yet verified. HTTPS/TLS, retries, resume, range segments, pause/cancel and configurable destinations remain incomplete.
+The current build adds a single sequential download worker. PS5 builds now use `libSceHttp`/`libSceSsl`, an embedded CA bundle, certificate verification, bounded reads and manual redirect handling that refuses HTTPS-to-HTTP downgrade. Host builds retain the plain-HTTP socket transport. Both write uniquely named files under `/data/homebrew`, preflight known sizes with a 16 MiB reserve, and publish only after `fsync` and successful completion. Queue copies are heap allocated and the worker requests a 1 MiB stack after the user observed the previous payload stop at download start. Host tests and target cross-compilation pass; PS5 HTTPS, downloads, destination writability, thread behavior and state migration still need console validation. Retries, resume, range segments, pause/cancel and configurable destinations remain incomplete.
 
 For iterative deployment, `elfldr` creates one process per incoming payload; it does not replace a previous copy. Raw ELF deployment is named `payload.elf`. Stop only the identifiable old RD Downloader process in Payload Manager before replacing it, then confirm port 8090 is released. Do not terminate an uncertain process just because it has the generic name. No reboot is needed for each build. During a transfer, termination preserves the `.part` file and startup marks that job failed; true resume is not yet implemented.
 
@@ -51,10 +51,12 @@ For iterative deployment, `elfldr` creates one process per incoming payload; it 
 - Add request-size limits, strict JSON parsing, path validation, state-changing request protection, and bind-address policy.
 - Verify mobile Safari access on the local network.
 
-### 3. Direct sequential download (initial HTTP path implemented, runtime gate open)
+### 3. Direct sequential download (HTTP and HTTPS transports compile; runtime gate open)
 
-- Choose an SDK-compatible HTTP/TLS client only after compiling a minimal HTTPS request with certificate verification.
-- Stream bounded buffers to a staging file, follow redirects safely, sanitize filenames, validate status/length, and atomically finalize.
+- The PS5 target uses the installed SDK's `libSceHttp` and `libSceSsl`; CA roots are embedded from Debian's `ca-certificates` bundle.
+- Explicitly enable server, hostname, CA, and SNI verification; do not disable certificate validation.
+- Stream bounded buffers to a staging file, follow up to five redirects, reject HTTPS downgrade, sanitize filenames, validate status/length, and atomically finalize.
+- Verify HTTPS request, current CA-chain behavior, redirects, unknown length, interrupted transfer, disk-full behavior and final hash on the actual PS5.
 - Test plain HTTP/HTTPS, redirects, unknown length, interrupted transfer, disk-full, and final hash on host fixtures and then on PS5.
 
 ### 4. Persistent queue and resume
@@ -89,7 +91,7 @@ For iterative deployment, `elfldr` creates one process per incoming payload; it 
 
 ## Immediate next action
 
-After reviewing old test entries in the queue and removing them, deploy the current build and test a 16 KiB HTTP file served from the Debian PC on the same LAN. Verify the job reaches `completed`, compare its SHA-256 with the PC fixture, and check the file exists under `/data/homebrew`. This first runtime check must use `http://` only; do not use an HTTPS URL or a large file. If the process or console behaves unexpectedly, stop testing and report the exact queue state/error before changing storage or payload lifecycle.
+Stop the old RD Downloader process in Payload Manager, deploy the current build, and first confirm `/api/health` reports version `0.3.0-https-dev` with `worker_ready:true`. Then try the user's small HTTPS RAR sample. Verify the payload remains reachable, the queue reaches `completed`, and the output exists under `/data/homebrew`. If TLS or redirects fail, use the exact queue error to adjust the HTTPS path before attempting larger files. Compare the resulting file hash with the provided sample when a trusted hash is available.
 
 ## Reproduction commands
 
