@@ -2,7 +2,13 @@
 
 ## Current code status (2026-11-23)
 
-The current build contains a mobile queue dashboard, an atomic persistent queue, and a single sequential download worker. The PS5 target uses `libSceHttp`/`libSceSsl` with an embedded Debian Mozilla-derived CA bundle, explicit certificate verification options, bounded streaming, manual redirect handling and HTTPS downgrade refusal. The user confirmed that the sample HTTPS download completed on the PS5. The host target retains the POSIX plain-HTTP transport. Downloads write to `/data/homebrew` and keep incomplete `.part` files. The user reported that the previous payload stopped when starting a download; queue updates now use heap copies and the worker requests a 1 MiB stack. Build and worker readiness are exposed through `/api/health`. Range/resume, retries, pause/cancel, archive extraction, Real-Debrid and settings are not implemented.
+The current build contains a mobile dashboard, atomic persistent queue, and a single sequential download worker. The PS5 target uses `libSceHttp`/`libSceSsl` with an embedded CA bundle, certificate verification, bounded streaming, manual redirects and HTTPS downgrade refusal. The user confirmed the sample HTTPS download completed on the PS5. Files are written to `/data/homebrew`, preflight known sizes with a 16 MiB reserve, and publish only after `fsync` and successful completion.
+
+The dashboard now asks for confirmation before adding links, shows URL-derived filenames and the destination, and provides pause/resume, retry and remove controls. Pause is cooperative at HTTP read callback boundaries. Retry starts from byte zero and removes only the corresponding regular `.part` file. Current/average speed and ETA are calculated from transfer callbacks. Queue format RDQ5 persists extraction choice, filename and destination. An optional extraction password stays in process memory and is neither serialized nor returned by the API.
+
+Archive extraction is still not implemented: WFM helper has not been built or integrated. When extraction is selected for a downloaded archive, its queue state becomes `ready_to_extract` and the UI reports that helper integration is pending. No extraction is performed. Names currently come from the URL path; `Content-Disposition` and final redirect names are not yet read. Range resume, segmented transfers, Real-Debrid, destination selection and storage wait/recovery remain open.
+
+Current verification: `make host-test`, `make host-server`, and the PS5 cross-build pass. Host network transfer and new command behavior remain to be validated, including on actual PS5 hardware.
 
 The SDK HTTP2 sample and another PS5 downloader's reported large-transfer experience informed the decision to keep the first worker on POSIX sockets. See the transport evaluation in [`RESEARCH.md`](RESEARCH.md).
 

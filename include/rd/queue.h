@@ -5,6 +5,7 @@
 #define RD_MAX_URL_LENGTH 4096U
 #define RD_MAX_QUEUE_ITEMS 64U
 #define RD_DEFAULT_DESTINATION "/data/homebrew"
+#define RD_MAX_PASSWORD_LENGTH 256U
 
 typedef enum rd_job_state {
     RD_JOB_QUEUED = 0,
@@ -31,7 +32,12 @@ typedef struct rd_queue_item {
     rd_job_state state;
     unsigned long long expected_bytes;
     unsigned long long downloaded_bytes;
+    unsigned long long speed_bps;
+    unsigned long long average_bps;
+    unsigned long long eta_seconds;
     int extract_after_download;
+    /* Password is intentionally in-memory only and never serialized. */
+    char extraction_password[RD_MAX_PASSWORD_LENGTH];
     char error[256];
 } rd_queue_item;
 
@@ -50,6 +56,9 @@ const char *rd_job_state_name(rd_job_state state);
 /* State is stored as a versioned, escaped text file and replaced atomically. */
 int rd_queue_init(rd_queue *queue, const char *state_path);
 int rd_queue_add_batch(rd_queue *queue, const char (*urls)[RD_MAX_URL_LENGTH], size_t count);
+int rd_queue_add_batch_options(rd_queue *queue, const char (*urls)[RD_MAX_URL_LENGTH],
+                               size_t count, int extract_after_download,
+                               const char *password);
 int rd_queue_remove(rd_queue *queue, unsigned long id);
 int rd_queue_update(rd_queue *queue, unsigned long id, rd_job_state state,
                     unsigned long long downloaded, unsigned long long expected,

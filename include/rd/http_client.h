@@ -35,5 +35,6 @@ int rd_http_parse_response_headers(const char *text, size_t length,
 int rd_http_download(const char *url, const char *directory, unsigned long item_id,
                      rd_http_progress_fn progress, void *context,
                      char *error, size_t error_capacity);
+int rd_http_reset_partial(const char *url, const char *directory, unsigned long item_id);
 
 #endif

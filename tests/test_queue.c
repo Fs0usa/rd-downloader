@@ -48,6 +48,16 @@ int main(void) {
                restored.items[1].id == 3);
         assert(restored.items[1].state == RD_JOB_FAILED &&
                strcmp(restored.items[1].error, "bad_error_") == 0);
+        assert(rd_parse_url_batch("https://host.example/archives/My%20Game.rar", urls, 3) == 1);
+        assert(rd_queue_add_batch_options(&restored,
+               (const char (*)[RD_MAX_URL_LENGTH])urls, 1, 0, "secret") == 1);
+        assert(strcmp(restored.items[2].filename, "My_Game.rar") == 0);
+        assert(restored.items[2].extract_after_download == 0);
+        assert(strcmp(restored.items[2].extraction_password, "secret") == 0);
+        assert(rd_queue_init(&q, path) == 0 && q.count == 3);
+        assert(q.items[2].extract_after_download == 0);
+        assert(q.items[2].extraction_password[0] == '\0');
+        assert(strcmp(q.items[2].filename, "My_Game.rar") == 0);
         unlink(path);
         {
             char temp_path[sizeof(path) + 8];
@@ -83,7 +93,7 @@ int main(void) {
         assert(q.count == 1 && strcmp(q.items[0].url, "http://legacy.example/file.bin") == 0);
         file = fopen(path, "r");
         assert(file != NULL && fgets(header, sizeof(header), file) != NULL);
-        assert(strcmp(header, "RDQ4\t2\n") == 0);
+        assert(strcmp(header, "RDQ5\t2\n") == 0);
         fclose(file);
         unlink(path);
     }

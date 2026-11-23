@@ -20,6 +20,8 @@
 int rd_ps5_http_download(const char *input_url, const char *directory,
                          unsigned long item_id, rd_http_progress_fn progress,
                          void *context, char *error, size_t error_capacity);
+int rd_ps5_http_reset_partial(const char *input_url, const char *directory,
+                              unsigned long item_id);
 #endif
 
 int rd_http_parse_url(const char *text, rd_http_url *url) {
@@ -444,7 +446,7 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
     char redirect_url[sizeof(url_text)];
     char header_buffer[RD_HTTP_HEADER_LIMIT + 1U];
     char filename[192], final_path[768], part_path[784];
-    rd_http_url url;
+    rd_http_url url, filename_url;
     unsigned int redirects;
     int fd = -1, file_fd = -1, result = -1;
     struct stat st;
@@ -460,6 +462,7 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
         set_error(error, error_capacity, "only valid plain HTTP URLs are supported by this MVP transport");
         return -1;
     }
+    filename_url = url;
     strcpy(url_text, input_url);
     if (stat(directory, &st) != 0 || !S_ISDIR(st.st_mode) || access(directory, W_OK) != 0) {
         set_error(error, error_capacity, "destination is missing or not writable");
@@ -517,7 +520,7 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
             set_error(error, error_capacity, message);
             close(fd); fd = -1; goto done;
         }
-        if (make_filename(&url, item_id, filename, sizeof(filename)) != 0 ||
+        if (make_filename(&filename_url, item_id, filename, sizeof(filename)) != 0 ||
             snprintf(final_path, sizeof(final_path), "%s/%s", directory, filename) >= (int)sizeof(final_path) ||
             snprintf(part_path, sizeof(part_path), "%s.part", final_path) >= (int)sizeof(part_path)) {
             set_error(error, error_capacity, "filename or output path is too long");
@@ -588,11 +591,26 @@ done:
     if (file_fd >= 0) close(file_fd);
     return result;
 }
+
+int rd_http_reset_partial(const char *input_url, const char *directory, unsigned long item_id) {
+    rd_http_url url;
+    char filename[192], final_path[768], part_path[784];
+    struct stat st;
+    if (!input_url || !directory || !item_id || rd_http_parse_url(input_url, &url) != 0 ||
+        make_filename(&url, item_id, filename, sizeof(filename)) != 0 ||
+        snprintf(final_path, sizeof(final_path), "%s/%s", directory, filename) >= (int)sizeof(final_path) ||
+        snprintf(part_path, sizeof(part_path), "%s.part", final_path) >= (int)sizeof(part_path)) return -1;
+    if (lstat(part_path, &st) != 0) return errno == ENOENT ? 0 : -1;
+    return S_ISREG(st.st_mode) ? unlink(part_path) : -1;
+}
 #else
 int rd_http_download(const char *input_url, const char *directory, unsigned long item_id,
                      rd_http_progress_fn progress, void *context,
                      char *error, size_t error_capacity) {
     return rd_ps5_http_download(input_url, directory, item_id, progress,
                                 context, error, error_capacity);
+}
+int rd_http_reset_partial(const char *input_url, const char *directory, unsigned long item_id) {
+    return rd_ps5_http_reset_partial(input_url, directory, item_id);
 }
 #endif

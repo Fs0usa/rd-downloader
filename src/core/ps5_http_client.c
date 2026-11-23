@@ -283,6 +283,12 @@ static int make_output_path(const char *directory, const char *url,
     }
     for (i = 0; name[i] && used < sizeof(base) - 1U; ++i) {
         unsigned char c = (unsigned char)name[i];
+        if (c == '%' && name[i + 1U] && name[i + 2U] &&
+            isxdigit((unsigned char)name[i + 1U]) && isxdigit((unsigned char)name[i + 2U])) {
+            char hex[3] = { name[i + 1U], name[i + 2U], '\0' };
+            c = (unsigned char)strtoul(hex, NULL, 16);
+            i += 2U;
+        }
         if (c == '/' || c == '\\' || c == ':' || c < 0x20U || c == 0x7fU ||
             !(isalnum(c) || c == '.' || c == '_' || c == '-')) c = '_';
         base[used++] = (char)c;
@@ -500,6 +506,17 @@ done:
     if (ssl >= 0) sceSslTerm(ssl);
     if (net_pool >= 0) sceNetPoolDestroy(net_pool);
     return result;
+}
+
+int rd_ps5_http_reset_partial(const char *input_url, const char *directory,
+                              unsigned long item_id) {
+    char final_path[768], part_path[784];
+    struct stat st;
+    if (!input_url || !directory || !item_id ||
+        make_output_path(directory, input_url, item_id, final_path, sizeof(final_path),
+                         part_path, sizeof(part_path)) != 0) return -1;
+    if (lstat(part_path, &st) != 0) return errno == ENOENT ? 0 : -1;
+    return S_ISREG(st.st_mode) ? unlink(part_path) : -1;
 }
 
 #endif

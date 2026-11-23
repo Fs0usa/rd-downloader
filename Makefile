@@ -47,9 +47,9 @@ host-test:
 	./build-http-tests
 	rm -f build-range-tests build-space-tests build-queue-tests build-http-tests
 
-host-server: src/main.c src/core/http_server.c src/core/http_client.c src/core/queue.c include/rd/http_server.h include/rd/http_client.h include/rd/queue.h
+host-server: src/main.c src/core/http_server.c src/core/http_client.c src/core/queue.c src/core/archive.c include/rd/http_server.h include/rd/http_client.h include/rd/queue.h include/rd/archive.h
 	$(HOST_CC) -std=c11 -D_DEFAULT_SOURCE -DRD_HOST_BUILD -Wall -Wextra -Werror -O2 -pthread -Iinclude \
-		src/main.c src/core/http_server.c src/core/http_client.c src/core/ps5_http_client.c src/core/queue.c -o rd-downloader-host
+		src/main.c src/core/http_server.c src/core/http_client.c src/core/ps5_http_client.c src/core/queue.c src/core/archive.c -o rd-downloader-host
 
 host-run: host-server
 	./rd-downloader-host
