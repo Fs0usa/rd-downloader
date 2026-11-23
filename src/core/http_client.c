@@ -598,8 +598,10 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
         }
         file_fd = rd_output_create(&output);
         if (file_fd < 0) {
-            set_error(error, error_capacity, errno == EEXIST ?
-                      "partial file already exists; preserving it" : "cannot create partial output file");
+            if (errno == EEXIST) set_error(error, error_capacity,
+                                           "partial output or ownership record already exists; preserving it");
+            else if (error && error_capacity)
+                snprintf(error, error_capacity, "cannot create partial output file: %s", strerror(errno));
             goto done;
         }
         if (progress && progress(0, headers.has_content_length ? headers.content_length : 0,

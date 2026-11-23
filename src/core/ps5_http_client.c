@@ -453,7 +453,14 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
             }
         }
         output_fd = rd_output_create(&output);
-        if (output_fd < 0) { set_error(error, error_capacity, "cannot create partial output file"); goto done; }
+        if (output_fd < 0) {
+            if (errno == EEXIST)
+                set_error(error, error_capacity,
+                          "partial output or ownership marker already exists; retry or remove the stale partial");
+            else
+                snprintf(error, error_capacity, "cannot create partial output file: %s", strerror(errno));
+            goto done;
+        }
         buffer = (unsigned char *)malloc(RD_SCE_IO_SIZE);
         if (!buffer) { set_error(error, error_capacity, "out of memory for download buffer"); goto done; }
         if (progress && progress(0, expected, context) != 0) {
