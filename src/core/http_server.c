@@ -84,7 +84,9 @@ static const char index_body[] =
     "msg.textContent='';if(path==='/api/queue')document.querySelector('#urls').value='';await refresh()}catch(e){msg.textContent=e.message}}"
     "document.querySelector('#add').onclick=()=>{const b=document.querySelector('#urls').value.trim();"
     "if(b)command('/api/queue','POST',b)};"
-    "document.querySelector('#start').onclick=()=>command('/api/start','POST','');refresh();setInterval(refresh,2500);"
+    "document.querySelector('#start').onclick=()=>{if(document.querySelector('#urls').value.trim())"
+    "{msg.textContent='Add the links to the queue first, then press Start.';return}"
+    "command('/api/start','POST','')};refresh();setInterval(refresh,2500);"
     "</script></body></html>\n";
 
 static int send_response(int fd, int status, const char *reason,

@@ -173,77 +173,88 @@ int rd_queue_init(rd_queue *queue, const char *state_path) {
 }
 
 int rd_queue_add_batch(rd_queue *queue, const char (*urls)[RD_MAX_URL_LENGTH], size_t count) {
-    rd_queue candidate;
+    rd_queue *candidate;
     size_t i;
     if (!queue || (!urls && count) || queue->count > RD_MAX_QUEUE_ITEMS ||
         count > RD_MAX_QUEUE_ITEMS - queue->count ||
         (count && (queue->next_id == 0 || count > ULONG_MAX - queue->next_id))) return -1;
-    candidate = *queue;
+    candidate = (rd_queue *)malloc(sizeof(*candidate));
+    if (!candidate) return -1;
+    *candidate = *queue;
     for (i = 0; i < count; ++i) {
-        rd_queue_item *item = &candidate.items[candidate.count++];
+        rd_queue_item *item = &candidate->items[candidate->count++];
         size_t url_length = strnlen(urls[i], RD_MAX_URL_LENGTH);
         if (url_length == 0 || url_length >= RD_MAX_URL_LENGTH ||
-            !has_http_scheme(urls[i], url_length)) return -1;
+            !has_http_scheme(urls[i], url_length)) { free(candidate); return -1; }
         memset(item, 0, sizeof(*item));
-        item->id = candidate.next_id++;
+        item->id = candidate->next_id++;
         item->state = RD_JOB_QUEUED;
         item->extract_after_download = 1;
         snprintf(item->destination, sizeof(item->destination), "%s", RD_DEFAULT_DESTINATION);
         memcpy(item->url, urls[i], url_length + 1U);
     }
-    if (save_queue(&candidate) != 0) return -1;
-    *queue = candidate;
+    if (save_queue(candidate) != 0) { free(candidate); return -1; }
+    *queue = *candidate;
+    free(candidate);
     return (int)count;
 }
 
 int rd_queue_remove(rd_queue *queue, unsigned long id) {
-    rd_queue candidate;
+    rd_queue *candidate;
     size_t i;
     if (!queue || id == 0) return -1;
-    candidate = *queue;
-    for (i = 0; i < candidate.count; ++i) {
-        if (candidate.items[i].id == id) {
-            memmove(&candidate.items[i], &candidate.items[i + 1U],
-                    (candidate.count - i - 1U) * sizeof(candidate.items[0]));
-            --candidate.count;
-            memset(&candidate.items[candidate.count], 0, sizeof(candidate.items[0]));
-            if (save_queue(&candidate) != 0) return -1;
-            *queue = candidate;
+    candidate = (rd_queue *)malloc(sizeof(*candidate));
+    if (!candidate) return -1;
+    *candidate = *queue;
+    for (i = 0; i < candidate->count; ++i) {
+        if (candidate->items[i].id == id) {
+            memmove(&candidate->items[i], &candidate->items[i + 1U],
+                    (candidate->count - i - 1U) * sizeof(candidate->items[0]));
+            --candidate->count;
+            memset(&candidate->items[candidate->count], 0, sizeof(candidate->items[0]));
+            if (save_queue(candidate) != 0) { free(candidate); return -1; }
+            *queue = *candidate;
+            free(candidate);
             return 0;
         }
     }
+    free(candidate);
     return -2;
 }
 
 int rd_queue_update(rd_queue *queue, unsigned long id, rd_job_state state,
                     unsigned long long downloaded, unsigned long long expected,
                     const char *error) {
-    rd_queue candidate;
+    rd_queue *candidate;
     size_t i;
     if (!queue || id == 0 || (unsigned int)state >= 14U ||
         (expected && downloaded > expected)) return -1;
-    candidate = *queue;
-    for (i = 0; i < candidate.count; ++i) {
-        if (candidate.items[i].id == id) {
-            candidate.items[i].state = state;
-            candidate.items[i].downloaded_bytes = downloaded;
-            candidate.items[i].expected_bytes = expected;
+    candidate = (rd_queue *)malloc(sizeof(*candidate));
+    if (!candidate) return -1;
+    *candidate = *queue;
+    for (i = 0; i < candidate->count; ++i) {
+        if (candidate->items[i].id == id) {
+            candidate->items[i].state = state;
+            candidate->items[i].downloaded_bytes = downloaded;
+            candidate->items[i].expected_bytes = expected;
             if (error) {
                 size_t j;
-                for (j = 0; j + 1U < sizeof(candidate.items[i].error) && error[j]; ++j) {
+                for (j = 0; j + 1U < sizeof(candidate->items[i].error) && error[j]; ++j) {
                     unsigned char c = (unsigned char)error[j];
-                    candidate.items[i].error[j] =
+                    candidate->items[i].error[j] =
                         (c < 0x20U || c >= 0x7fU || c == '"' || c == '\\') ? '_' : (char)c;
                 }
-                candidate.items[i].error[j] = '\0';
-                memset(candidate.items[i].error + j + 1U, 0,
-                       sizeof(candidate.items[i].error) - j - 1U);
+                candidate->items[i].error[j] = '\0';
+                memset(candidate->items[i].error + j + 1U, 0,
+                       sizeof(candidate->items[i].error) - j - 1U);
             }
-            if (save_queue(&candidate) != 0) return -1;
-            *queue = candidate;
+            if (save_queue(candidate) != 0) { free(candidate); return -1; }
+            *queue = *candidate;
+            free(candidate);
             return 0;
         }
     }
+    free(candidate);
     return -2;
 }
 
