@@ -97,6 +97,12 @@ int main(void) {
         assert(q.items[2].extract_after_download == 0);
         assert(q.items[2].extraction_password[0] == '\0');
         assert(strcmp(q.items[2].filename, "My_Game.rar") == 0);
+        assert(rd_queue_update(&q, 2, RD_JOB_COMPLETED, 10, 10, "") == 0);
+        assert(rd_queue_clear_completed(&q) == 1);
+        assert(q.count == 2 && q.items[0].id == 3 && q.items[1].id == 4);
+        assert(rd_queue_init(&restored, path) == 0 && restored.count == 2 &&
+               restored.items[0].id == 3 && restored.items[1].id == 4);
+        assert(rd_queue_clear_completed(&restored) == 0);
         unlink(path);
         {
             char temp_path[sizeof(path) + 8];

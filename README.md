@@ -30,12 +30,15 @@ The workflow above describes the goal, not the current feature set.
 
 The working tree adds a visible optional-password field, remembers it in browser `localStorage` under `rd.archivePassword`, and sends it to `POST /api/add` with the URL batch. The server keeps it only in process memory and omits it from API responses and queue persistence. It also starts downloads immediately after confirmation, requires a second confirmation to stop/remove, cleans owned partial files, uses URL-derived output names without the old `rd-{id}-` prefix, and displays speed/average/ETA. These changes pass host tests and cross-compile, but are not yet validated on the console. Additional files run sequentially. Pause is cooperative at progress callback boundaries; retry starts at byte zero; payload restart does not resume a transfer. Removing a completed queue entry leaves its final file.
 
+The dashboard source is [`web/index.html`](web/index.html); `scripts/embed_web.py` embeds it for the native build. Its narrow mobile layout follows the supplied interface guide. Queue rows support pause/resume, retry and confirmed remove/stop; “Clear finished” removes only completed queue records and preserves their files. `GET /api/queue` reports the actual destination and extraction availability. The extraction checkbox records the requested option, while completed archive jobs explicitly state that extraction is unavailable until the WFM helper is integrated.
+
 Still missing: WFM extraction IPC (the toggle saves the choice and archive jobs report `ready_to_extract`; nothing is extracted), range/parallel downloads, retry backoff, Real-Debrid, destination selection, USB discovery and storage wait/recovery. The password reaches the backend in process memory but is not currently consumed by an extractor. Output names use a sanitized URL basename; HTTP `Content-Disposition` is not read.
 
 ## Queue API
 
 - `GET /api/queue` returns filenames, states, byte counts, speed/ETA and safe errors. It omits URLs and passwords.
 - `POST /api/add` accepts URL-encoded `urls`, `extract`, and `password` fields and starts the worker immediately. The older `POST /api/queue` newline-body interface remains supported.
+- `POST /api/clear` removes completed records from the queue atomically while leaving downloaded files in place.
 - `POST /api/start` remains available to wake queued jobs. Include `X-RD-Command: 1`.
 - `DELETE /api/queue/{id}` removes an item. On an active transfer it aborts the request, deletes the owned partial file after worker cleanup, and removes the queue entry. The dashboard requires a second confirmation. Removing a completed item keeps its file.
 

@@ -61,6 +61,7 @@ int rd_queue_add_batch_options(rd_queue *queue, const char (*urls)[RD_MAX_URL_LE
                                size_t count, int extract_after_download,
                                const char *password);
 int rd_queue_remove(rd_queue *queue, unsigned long id);
+int rd_queue_clear_completed(rd_queue *queue);
 int rd_queue_update(rd_queue *queue, unsigned long id, rd_job_state state,
                     unsigned long long downloaded, unsigned long long expected,
                     const char *error);

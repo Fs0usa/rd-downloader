@@ -39,101 +39,7 @@ static int download_requested = 1;
 static int worker_started;
 static unsigned long active_download_id;
 
-static const char index_body[] =
-    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-    "<meta name=\"theme-color\" content=\"#171421\"><title>RD Downloader</title>"
-    "<style>"
-    ":root{color-scheme:dark;font:16px system-ui,sans-serif;background:#171421;color:#f5f1ff}"
-    "*{box-sizing:border-box}body{margin:0 auto;padding:24px 16px;max-width:760px}"
-    "h1{font-size:1.65rem;margin:0 0 4px}.muted{color:#b9b0ca}"
-    ".card{background:#211d2d;border:1px solid #393148;border-radius:14px;padding:16px;margin:16px 0}"
-    "textarea{width:100%;min-height:130px;background:#15121c;color:#fff;border:1px solid #504663;"
-    "border-radius:10px;padding:12px;font:inherit;resize:vertical}"
-    "button{background:#8c5be8;color:white;border:0;border-radius:9px;padding:11px 15px;"
-    "font:600 1rem system-ui;cursor:pointer}button:disabled{opacity:.55}"
-    "ul{list-style:none;padding:0;margin:8px 0}li{display:flex;align-items:center;gap:12px;"
-    "border-top:1px solid #393148;padding:12px 2px}.job{flex:1;min-width:0}.state{color:#c9b1ff}"
-    "progress{width:100%;height:8px;accent-color:#a77cff}"
-    ".error{color:#ff9a9a;min-height:1.4em}.joberror{color:#ff9a9a}small{color:#aaa1b8}"
-    ".actions{display:flex;gap:6px}.icon{padding:8px 11px;min-width:42px}.dest{padding:10px;border-radius:8px;"
-    "background:#15121c;color:#d6c9f1}.modal{position:fixed;inset:0;background:#000a;display:grid;place-items:center;padding:16px}"
-    ".dialog{width:min(100%,520px);background:#211d2d;border:1px solid #504663;border-radius:14px;padding:18px}"
-    ".dialog #password{width:100%;padding:11px;background:#15121c;color:white;border:1px solid #504663;border-radius:8px}"
-    ".row{display:flex;align-items:center;gap:9px;margin:16px 0}.hidden{display:none}.metrics{display:flex;gap:12px;flex-wrap:wrap}"
-    ".backend{font-size:.9rem;margin-top:8px}.online{color:#8de0a4}.offline{color:#ff9a9a}"
-    "</style></head><body><header><h1>RD Downloader</h1>"
-    "<div class=\"muted\">PS5 downloads · direct HTTP and HTTPS</div>"
-    "<div id=\"backend\" class=\"backend offline\" role=\"status\">Checking PS5 service…</div></header>"
-    "<section class=\"card\"><label for=\"urls\"><strong>Add direct download links</strong></label>"
-    "<p class=\"muted\">Paste one HTTP or HTTPS link per line.</p>"
-    "<textarea id=\"urls\" placeholder=\"https://example.com/file.zip\"></textarea>"
-    "<p class=\"dest\">Downloads will be saved to <strong>/data/homebrew</strong>.</p>"
-    "<p><button id=\"add\">Review and add</button></p>"
-    "<div id=\"message\" class=\"error\" role=\"status\"></div>"
-    "</section><section class=\"card\"><strong>Queue</strong><ul id=\"queue\"></ul>"
-    "<div id=\"empty\" class=\"muted\">No queued links.</div></section>"
-    "<small>Queue state is stored on the PS5. Closing this page does not stop downloads.</small>"
-    "<div id=\"modal\" class=\"modal hidden\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"modalTitle\">"
-    "<div class=\"dialog\"><h2 id=\"modalTitle\">Confirm queue settings</h2><p>Save location: <strong>/data/homebrew</strong></p>"
-    "<p class=\"row\"><input id=\"extract\" type=\"checkbox\" checked><label for=\"extract\">Extract archives after download</label></p>"
-    "<small>Archive extraction is not active in this build; archive jobs will wait for helper integration.</small>"
-    "<label for=\"password\">Archive password <span class=\"muted\">(optional)</span></label>"
-    "<input id=\"password\" type=\"text\" spellcheck=\"false\" autocapitalize=\"off\" autocorrect=\"off\" maxlength=\"255\" autocomplete=\"off\" placeholder=\"Leave blank if not needed\">"
-    "<p class=\"error\" id=\"modalMessage\" role=\"status\"></p><button id=\"confirm\">Start download</button> "
-    "<button id=\"abort\" type=\"button\">Cancel</button></div></div>"
-    "<script>"
-    "const list=document.querySelector('#queue'),empty=document.querySelector('#empty'),msg=document.querySelector('#message');"
-    "function size(n){n=Number(n)||0;if(n<1024)return n+' B';const u=['KB','MB','GB','TB'];let i=-1;"
-    "do{n/=1024;i++}while(n>=1024&&i<u.length-1);return n.toFixed(1)+' '+u[i]}"
-    "function offlineMessage(){return 'Cannot reach PS5 service. Check whether the payload stopped in Payload Manager, then reload.'}"
-    "let confirmId=null;"
-    "async function refresh(){try{const r=await fetch('/api/queue',{cache:'no-store'});"
-    "if(!r.ok)throw Error('PS5 service returned HTTP '+r.status);const d=await r.json();"
-    "const backend=document.querySelector('#backend');backend.className='backend online';"
-    "backend.textContent='PS5 service online · HTTP and HTTPS downloader';"
-    "list.replaceChildren();empty.hidden=d.items.length>0;"
-    "for(const item of d.items){const li=document.createElement('li'),label=document.createElement('div'),"
-    "state=document.createElement('span'),actions=document.createElement('div'),bar=document.createElement('progress'),"
-    "bytes=document.createElement('small');label.className='job';"
-    "bar.max=Number(item.expected_bytes)||1;if(Number(item.expected_bytes)>0)bar.value=Number(item.downloaded_bytes);"
-    "else bar.removeAttribute('value');bytes.textContent=size(item.downloaded_bytes)+' / '+"
-    "(Number(item.expected_bytes)>0?size(item.expected_bytes):'size unknown');label.textContent=item.filename||('download-'+item.id);"
-    "label.append(document.createElement('br'),bar,document.createElement('br'),bytes);"
-    "const metrics=document.createElement('small');metrics.className='metrics';metrics.textContent='Current '+size(item.speed_bps)+'/s · Average '+size(item.average_bps)+'/s · ETA '+(item.eta_seconds>0?item.eta_seconds+'s':'—');"
-    "label.append(document.createElement('br'),metrics);"
-    "if(item.error){const e=document.createElement('small');e.className='joberror';e.textContent=item.error;"
-    "label.append(document.createElement('br'),e)}state.className='state';state.textContent=item.state;"
-    "actions.className='actions';"
-    "if(item.state==='downloading'||item.state==='queued'||item.state==='paused'){const toggle=document.createElement('button');toggle.className='icon';"
-    "const pausing=item.state!=='paused';toggle.textContent=pausing?'Ⅱ':'▶';toggle.title=pausing?'Pause':'Resume';toggle.setAttribute('aria-label',toggle.title+' '+item.filename);"
-    "toggle.onclick=()=>command('/api/queue/'+item.id+'/'+(pausing?'pause':'resume'),'POST','');actions.append(toggle)}"
-    "if(item.state==='failed'){const retry=document.createElement('button');retry.className='icon';retry.textContent='↻';retry.title='Retry';retry.setAttribute('aria-label','Retry '+item.filename);retry.onclick=()=>command('/api/queue/'+item.id+'/retry','POST','');actions.append(retry)}"
-    "const stopping=item.state==='downloading'||item.state==='paused';const actionLabel=stopping?'Stop download and delete its partial file':'Remove from queue';"
-    "const remove=document.createElement('button');remove.className='icon';remove.textContent=confirmId===item.id?'Confirm?':'×';remove.title=actionLabel;remove.setAttribute('aria-label',actionLabel+' for '+item.filename);"
-    "if(confirmId===item.id){remove.title='Confirm: '+actionLabel;remove.setAttribute('aria-label',remove.title)}"
-    "remove.onclick=()=>{if(confirmId!==item.id||remove.textContent!=='Confirm?'){confirmId=item.id;remove.textContent='Confirm?';remove.title='Confirm: '+actionLabel;remove.setAttribute('aria-label',remove.title);refresh();return}confirmId=null;remove.disabled=true;command('/api/queue/'+item.id,'DELETE')};actions.append(remove);li.append(label,state,actions);list.append(li)}}"
-    "catch(e){empty.hidden=true;const backend=document.querySelector('#backend');"
-    "backend.className='backend offline';backend.textContent='PS5 service unreachable';"
-    "msg.textContent=e instanceof TypeError?offlineMessage():e.message}}"
-    "async function command(path,method,body){try{const r=await fetch(path,{method,body,headers:{'X-RD-Command':'1',"
-    "'Content-Type':'text/plain'},cache:'no-store'});const t=await r.text();if(!r.ok)throw Error(t||'Request failed');"
-    "msg.textContent='';if(path==='/api/queue')document.querySelector('#urls').value='';await refresh()}"
-    "catch(e){msg.textContent=e instanceof TypeError?offlineMessage():e.message}}"
-    "const modal=document.querySelector('#modal'),password=document.querySelector('#password');"
-    "const savedPassword={get(){try{return localStorage.getItem('rd.archivePassword')||''}catch(e){return ''}},"
-    "set(v){try{if(v)localStorage.setItem('rd.archivePassword',v);else localStorage.removeItem('rd.archivePassword')}catch(e){}}};"
-    "password.addEventListener('input',()=>savedPassword.set(password.value));"
-    "document.querySelector('#add').onclick=()=>{if(document.querySelector('#urls').value.trim()){"
-    "document.querySelector('#modalMessage').textContent='';password.value=savedPassword.get();modal.classList.remove('hidden')}};"
-    "document.querySelector('#abort').onclick=()=>{modal.classList.add('hidden')};"
-    "document.querySelector('#confirm').onclick=async()=>{const b=document.querySelector('#urls').value.trim();if(!b)return;"
-    "const form=new URLSearchParams();form.set('urls',b);form.set('extract',document.querySelector('#extract').checked?'1':'0');form.set('password',password.value);"
-    "const headers={'X-RD-Command':'1','Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'};try{const r=await fetch('/api/add',{method:'POST',body:form,headers,cache:'no-store'});"
-    "const t=await r.text();if(!r.ok)throw Error(t||'Request failed');document.querySelector('#urls').value='';"
-    "modal.classList.add('hidden');msg.textContent='';await refresh()}catch(e){document.querySelector('#modalMessage').textContent=e.message}};"
-    "refresh();setInterval(refresh,2500);"
-    "</script></body></html>\n";
+#include "index_html.inc"
 
 static int send_response(int fd, int status, const char *reason,
                          const char *content_type, const char *body,
@@ -314,16 +220,19 @@ static int send_queue(int fd) {
     if (!body) return send_response(fd, 503, "Service Unavailable",
         "application/json; charset=utf-8", no_memory, sizeof(no_memory) - 1U);
     pthread_mutex_lock(&queue_mutex);
-    n = snprintf(body, RD_HTTP_QUEUE_RESPONSE, "{\"items\":[");
+    n = snprintf(body, RD_HTTP_QUEUE_RESPONSE,
+                 "{\"online\":true,\"dir\":\"%s\",\"canExtract\":false,\"items\":[",
+                 RD_DOWNLOAD_DIRECTORY);
     if (n < 0 || (size_t)n >= RD_HTTP_QUEUE_RESPONSE) goto serialization_failed;
     used = (size_t)n;
     for (i = 0; i < server_queue.count; ++i) {
         const rd_queue_item *item = &server_queue.items[i];
         n = snprintf(body + used, RD_HTTP_QUEUE_RESPONSE - used,
-            "%s{\"id\":%lu,\"filename\":\"%s\",\"state\":\"%s\",\"downloaded_bytes\":%llu,\"expected_bytes\":%llu,\"speed_bps\":%llu,\"average_bps\":%llu,\"eta_seconds\":%llu,\"error\":\"%s\"}",
+            "%s{\"id\":%lu,\"filename\":\"%s\",\"state\":\"%s\",\"downloaded_bytes\":%llu,\"expected_bytes\":%llu,\"speed_bps\":%llu,\"average_bps\":%llu,\"eta_seconds\":%llu,\"extract\":%s,\"error\":\"%s\"}",
             i ? "," : "", item->id, item->filename, rd_job_state_name(item->state),
             item->downloaded_bytes, item->expected_bytes, item->speed_bps,
-            item->average_bps, item->eta_seconds, item->error);
+            item->average_bps, item->eta_seconds,
+            item->extract_after_download ? "true" : "false", item->error);
         if (n < 0 || (size_t)n >= RD_HTTP_QUEUE_RESPONSE - used) goto serialization_failed;
         used += (size_t)n;
     }
@@ -553,6 +462,26 @@ static void handle_client(int fd) {
                 pthread_cond_signal(&worker_condition);
                 pthread_mutex_unlock(&queue_mutex);
                 (void)send_queue(fd);
+            }
+        } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/clear") == 0) {
+            int cleared;
+            if (!command_header_ok(request) || body_length != 0) {
+                static const char error_body[] = "invalid clear request\n";
+                (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
+                                    error_body, sizeof(error_body) - 1U);
+            } else if (!queue_ready) {
+                static const char error_body[] = "queue storage unavailable\n";
+                (void)send_response(fd, 503, "Service Unavailable", "text/plain; charset=utf-8",
+                                    error_body, sizeof(error_body) - 1U);
+            } else {
+                pthread_mutex_lock(&queue_mutex);
+                cleared = rd_queue_clear_completed(&server_queue);
+                pthread_mutex_unlock(&queue_mutex);
+                if (cleared < 0) {
+                    static const char error_body[] = "could not persist queue update\n";
+                    (void)send_response(fd, 503, "Service Unavailable", "text/plain; charset=utf-8",
+                                        error_body, sizeof(error_body) - 1U);
+                } else (void)send_queue(fd);
             }
         } else if (strcmp(method, "POST") == 0 &&
                    (strcmp(path, "/api/queue") == 0 || strcmp(path, "/api/add") == 0)) {

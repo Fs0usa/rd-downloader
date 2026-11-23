@@ -264,6 +264,39 @@ int rd_queue_remove(rd_queue *queue, unsigned long id) {
     return -2;
 }
 
+int rd_queue_clear_completed(rd_queue *queue) {
+    rd_queue *candidate;
+    size_t read_index, write_index = 0;
+    int removed = 0;
+    if (!queue) return -1;
+    candidate = (rd_queue *)malloc(sizeof(*candidate));
+    if (!candidate) return -1;
+    *candidate = *queue;
+    for (read_index = 0; read_index < candidate->count; ++read_index) {
+        if (candidate->items[read_index].state == RD_JOB_COMPLETED) {
+            ++removed;
+            continue;
+        }
+        if (write_index != read_index)
+            candidate->items[write_index] = candidate->items[read_index];
+        ++write_index;
+    }
+    if (!removed) {
+        free(candidate);
+        return 0;
+    }
+    memset(candidate->items + write_index, 0,
+           (candidate->count - write_index) * sizeof(candidate->items[0]));
+    candidate->count = write_index;
+    if (save_queue(candidate) != 0) {
+        free(candidate);
+        return -1;
+    }
+    *queue = *candidate;
+    free(candidate);
+    return removed;
+}
+
 int rd_queue_update(rd_queue *queue, unsigned long id, rd_job_state state,
                     unsigned long long downloaded, unsigned long long expected,
                     const char *error) {
