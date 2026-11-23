@@ -20,6 +20,7 @@
 #define RD_HTTP_MAX_CLIENTS 8
 #define RD_HTTP_QUEUE_RESPONSE (RD_MAX_QUEUE_ITEMS * 448U + 32U)
 #define RD_PROGRESS_SAVE_INTERVAL (16ULL * 1024ULL * 1024ULL)
+#define RD_DOWNLOAD_WORKER_STACK (1024U * 1024U)
 
 #ifdef RD_HOST_BUILD
 #define RD_DOWNLOAD_DIRECTORY "/tmp/rd-downloader-host-downloads"
@@ -51,8 +52,10 @@ static const char index_body[] =
     "border-top:1px solid #393148;padding:12px 2px}.job{flex:1;min-width:0}.state{color:#c9b1ff}"
     "progress{width:100%;height:8px;accent-color:#a77cff}"
     ".error{color:#ff9a9a;min-height:1.4em}.joberror{color:#ff9a9a}small{color:#aaa1b8}"
+    ".backend{font-size:.9rem;margin-top:8px}.online{color:#8de0a4}.offline{color:#ff9a9a}"
     "</style></head><body><header><h1>RD Downloader</h1>"
-    "<div class=\"muted\">PS5 downloads · plain HTTP only in this MVP</div></header>"
+    "<div class=\"muted\">PS5 downloads · plain HTTP only</div>"
+    "<div id=\"backend\" class=\"backend offline\" role=\"status\">Checking PS5 service…</div></header>"
     "<section class=\"card\"><label for=\"urls\"><strong>Add direct HTTP links</strong></label>"
     "<p class=\"muted\">Paste one link per line. HTTPS downloads are not enabled yet.</p>"
     "<textarea id=\"urls\" placeholder=\"http://example.com/file.zip\"></textarea>"
@@ -65,8 +68,12 @@ static const char index_body[] =
     "const list=document.querySelector('#queue'),empty=document.querySelector('#empty'),msg=document.querySelector('#message');"
     "function size(n){n=Number(n)||0;if(n<1024)return n+' B';const u=['KB','MB','GB','TB'];let i=-1;"
     "do{n/=1024;i++}while(n>=1024&&i<u.length-1);return n.toFixed(1)+' '+u[i]}"
-    "async function refresh(){try{const r=await fetch('/api/queue',{cache:'no-store'});const d=await r.json();"
-    "if(!r.ok)throw Error(d.error||'Queue unavailable');list.replaceChildren();empty.hidden=d.items.length>0;"
+    "function offlineMessage(){return 'Cannot reach PS5 service. Check whether the payload stopped in Payload Manager, then reload.'}"
+    "async function refresh(){try{const r=await fetch('/api/queue',{cache:'no-store'});"
+    "if(!r.ok)throw Error('PS5 service returned HTTP '+r.status);const d=await r.json();"
+    "const backend=document.querySelector('#backend');backend.className='backend online';"
+    "backend.textContent='PS5 service online · HTTP-only downloader';"
+    "list.replaceChildren();empty.hidden=d.items.length>0;"
     "for(const item of d.items){const li=document.createElement('li'),label=document.createElement('div'),"
     "state=document.createElement('span'),remove=document.createElement('button'),bar=document.createElement('progress'),"
     "bytes=document.createElement('small');label.className='job';"
@@ -78,10 +85,13 @@ static const char index_body[] =
     "label.append(document.createElement('br'),e)}state.className='state';state.textContent=item.state;"
     "remove.textContent='Remove';remove.setAttribute('aria-label','Remove item '+item.id);"
     "remove.onclick=()=>command('/api/queue/'+item.id,'DELETE');li.append(label,state,remove);list.append(li)}}"
-    "catch(e){empty.hidden=true;msg.textContent=e.message}}"
+    "catch(e){empty.hidden=true;const backend=document.querySelector('#backend');"
+    "backend.className='backend offline';backend.textContent='PS5 service unreachable';"
+    "msg.textContent=e instanceof TypeError?offlineMessage():e.message}}"
     "async function command(path,method,body){try{const r=await fetch(path,{method,body,headers:{'X-RD-Command':'1',"
     "'Content-Type':'text/plain'},cache:'no-store'});const t=await r.text();if(!r.ok)throw Error(t||'Request failed');"
-    "msg.textContent='';if(path==='/api/queue')document.querySelector('#urls').value='';await refresh()}catch(e){msg.textContent=e.message}}"
+    "msg.textContent='';if(path==='/api/queue')document.querySelector('#urls').value='';await refresh()}"
+    "catch(e){msg.textContent=e instanceof TypeError?offlineMessage():e.message}}"
     "document.querySelector('#add').onclick=()=>{const b=document.querySelector('#urls').value.trim();"
     "if(b.split(String.fromCharCode(10)).some(x=>x.trim().toLowerCase().startsWith('https://')))"
     "{msg.textContent='This build supports http:// links only; HTTPS support is not ready.';return}"
@@ -98,15 +108,17 @@ static int send_response(int fd, int status, const char *reason,
 static int send_health(int fd) {
     char body[256];
     size_t i;
-    int active = 0, length;
+    int active = 0, length, ready;
     pthread_mutex_lock(&queue_mutex);
     for (i = 0; i < server_queue.count; ++i)
         if (server_queue.items[i].state == RD_JOB_DOWNLOADING) active = 1;
+    ready = worker_started;
     pthread_mutex_unlock(&queue_mutex);
     length = snprintf(body, sizeof(body),
         "{\"status\":\"ok\",\"application\":\"rd-downloader\","
-        "\"version\":\"0.2.0-mvp-dev\",\"transport\":\"http-only\","
-        "\"downloader_active\":%s}\n", active ? "true" : "false");
+        "\"version\":\"0.2.1-worker-stack-guard\",\"transport\":\"http-only\","
+        "\"worker_ready\":%s,\"downloader_active\":%s}\n",
+        ready ? "true" : "false", active ? "true" : "false");
     if (length < 0 || (size_t)length >= sizeof(body)) return -1;
     return send_response(fd, 200, "OK", "application/json; charset=utf-8", body, (size_t)length);
 }
@@ -505,10 +517,20 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
 
     {
         pthread_t worker;
-        if (pthread_create(&worker, NULL, download_worker, NULL) == 0) {
+        pthread_attr_t worker_attributes;
+        int attributes_ready = pthread_attr_init(&worker_attributes) == 0;
+        int stack_ready = attributes_ready &&
+            pthread_attr_setstacksize(&worker_attributes, RD_DOWNLOAD_WORKER_STACK) == 0;
+        if (stack_ready && pthread_create(&worker, &worker_attributes,
+                                          download_worker, NULL) == 0) {
             (void)pthread_detach(worker);
             worker_started = 1;
+            fprintf(stderr, "RD Downloader: worker started with %u-byte stack\n",
+                    (unsigned int)RD_DOWNLOAD_WORKER_STACK);
+        } else {
+            fprintf(stderr, "RD Downloader: worker startup failed (thread or stack setup)\n");
         }
+        if (attributes_ready) (void)pthread_attr_destroy(&worker_attributes);
     }
 
     if (!bind_address || port == 0) return -1;

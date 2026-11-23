@@ -2,7 +2,7 @@
 
 ## Current code status (2026-11-23)
 
-The current un-deployed build contains a mobile queue dashboard, an atomic persistent queue, and a single worker for sequential plain-HTTP downloads. It supports bounded streaming, HTTP redirects, chunked or Content-Length responses, progress and an explicit Start button. It writes to `/data/homebrew` and keeps incomplete `.part` files. The user has confirmed the prior service and queue work on the PS5; the new HTTP worker, queue migration, storage checks and thread behavior still require the documented 16 KiB LAN smoke test. HTTPS, range/resume, retries, pause/cancel, archive extraction, Real-Debrid and settings are not implemented.
+The current build contains a mobile queue dashboard, an atomic persistent queue, and a single worker for sequential plain-HTTP downloads. It supports bounded streaming, HTTP redirects, chunked or Content-Length responses, progress and an explicit Start button. It writes to `/data/homebrew` and keeps incomplete `.part` files. The user reported that the payload stopped when starting a download. Queue updates already use heap copies; this build additionally requests a 1 MiB worker stack and exposes the build/worker readiness through `/api/health`. These changes still need on-console validation. HTTPS, range/resume, retries, pause/cancel, archive extraction, Real-Debrid and settings are not implemented.
 
 The SDK HTTP2 sample and another PS5 downloader's reported large-transfer experience informed the decision to keep the first worker on POSIX sockets. See the transport evaluation in [`RESEARCH.md`](RESEARCH.md).
 

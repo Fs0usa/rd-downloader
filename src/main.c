@@ -2,7 +2,7 @@
 #include <string.h>
 #include "rd/http_server.h"
 
-#define RD_DOWNLOADER_VERSION "0.2.0-mvp-dev"
+#define RD_DOWNLOADER_VERSION "0.2.1-dev"
 
 #ifndef RD_HOST_BUILD
 typedef struct rd_notification_request {
@@ -15,8 +15,7 @@ int sceKernelSendNotificationRequest(int, rd_notification_request *, size_t, int
 #endif
 
 /*
- * Phase 1 smoke payload: confirm loading with an on-screen notification
- * before adding networking, TLS, storage and worker threads.
+ * Start the local dashboard and bounded download worker.
  */
 int
 main(void)
