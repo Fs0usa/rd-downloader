@@ -12,8 +12,8 @@ The original ZIP contained no usable Git history. The project is now under Git; 
 
 - The SDK is installed at `.deps/ps5-payload-sdk` (v0.50), target cross-compilation succeeds, and the user has loaded the HTTPS downloader and confirmed an HTTPS sample download on PS5.
 - Host tests, host-server build, and the target build currently pass.
-- The downloader uses one sequential transfer worker. It does not yet implement range resume, segmented downloads, archive extraction, or Real-Debrid.
-- The source's `.r00` support requirement is unmet by `rd_classify_archive_name`; the current numeric branch handles `.rar` filenames ending with a digit instead of legacy `.r00` volumes.
+- The downloader uses one sequential transfer worker. Range resume, segmented downloads, and Real-Debrid are not implemented. WFM archive extraction has since been integrated; see the current status in [`IMPLEMENTATION.md`](IMPLEMENTATION.md).
+- The original bootstrap's `.r00` classification gap has since been fixed; the archive classifier now recognizes `.r00` and `.partNN.rar` sets.
 - The range planner has no HTTP-response verification, chunk scheduling, retry or persistence. Its caller must cap `max_connections` to an `int`-safe value.
 - The URL parser does not perform full URL validation. Treat it as a preliminary filter only; use a vetted parser or stronger authority validation before network access.
 - Current docs overstate what is verified about WFM helper internals. Research now separates upstream README claims from local source/build verification.
@@ -33,7 +33,7 @@ The original ZIP contained no usable Git history. The project is now under Git; 
 
 The dependency-free socket server serves `/`, `/api/health`, and the mobile queue UI. Linux mode binds to `127.0.0.1`; PS5 mode binds to `0.0.0.0:8090`. The user confirmed LAN access and an earlier queue file persisted across the prior build. The current queue file is versioned and migrated atomically from that earlier format. The PS5 state path is `/data/rd-downloader-queue.db`. The new UI adds links, displays state/progress/error, supports removal, and requires an explicit Start action.
 
-The current build status and limitations are tracked in [`IMPLEMENTATION.md`](IMPLEMENTATION.md). The queue page has confirmation, immediate start, URL-derived filenames, cooperative pause/resume, retry, confirmed active-stop/removal, destination display and transfer-rate/ETA fields. RDQ6 records the legacy partial-file naming transition. Archive extraction, range resume, Real-Debrid and configurable destinations are still incomplete. This working-tree milestone compiles, but the new queue controls need real hardware validation.
+The current build status and limitations are tracked in [`IMPLEMENTATION.md`](IMPLEMENTATION.md). The queue page has confirmation, immediate start, URL-derived filenames, cooperative pause/resume, retry, confirmed active-stop/removal, destination display and transfer-rate/ETA fields. RDQ6 records the legacy partial-file naming transition. WFM archive extraction now passes a host download-to-extract smoke check; PS5 helper launch and socket behavior need console validation. Range resume, Real-Debrid and configurable destinations remain incomplete.
 
 For iterative deployment, `elfldr` creates one process per incoming payload; it does not replace a previous copy. Raw ELF deployment is named `payload.elf`. Stop only the identifiable old RD Downloader process in Payload Manager before replacing it, then confirm port 8090 is released. Do not terminate an uncertain process just because it has the generic name. No reboot is needed for each build. During a transfer, termination preserves the `.part` file and startup marks that job failed; retry starts over after safely removing that partial file. Byte-range resume is not implemented.
 
@@ -67,9 +67,10 @@ For iterative deployment, `elfldr` creates one process per incoming payload; it 
 
 ### 5. Archive helper integration
 
-- Clone and pin WFM helper, inspect actual source/build/licenses and build it for the same target SDK.
-- Implement framed IPC with length caps and robust partial send/receive handling.
-- Test extraction formats, passwords, multipart discovery, traversal/symlink rejection, collisions, cancellation, task attachment and no-space behavior.
+- **Implemented:** pinned and inspected WFM helper source/build/license files; `scripts/build-wfm-helper.sh` builds the PS5 helper from its pinned commit.
+- **Implemented:** W7HP IPC, safe helper startup through the local ELF loader, PING/PONG checks, task listing/attachment, progress, cancellation and terminal acknowledgments.
+- **Host verified:** a downloaded ZIP was extracted through the Linux helper into the host destination.
+- **Open hardware gate:** PS5 socket visibility, helper launch, RAR/password/multipart extraction, path protections, collisions, cancellation, restart attachment and no-space behavior.
 - Do not promise pause/resume until a maintained helper implementation supports and verifies it.
 
 ### 6. Storage safety
@@ -91,7 +92,7 @@ For iterative deployment, `elfldr` creates one process per incoming payload; it 
 
 ## Immediate next action
 
-On the PS5, stop only the identifiable old RD Downloader process in Payload Manager, deploy the newly built ELF, and validate: (1) confirmation starts a download without pressing a second Start button, (2) the optional password is visible in the modal, (3) the AkiraBox-style URL saves as `_DLPSGAME.COM_-PPSA21402.rar.part` while active and `.rar` when complete, and (4) confirmed stop aborts the transfer, removes the partial file, and removes the queue row. Test pause/resume/retry after these checks. Do not test the unrar toggle as functional yet; WFM IPC is the next implementation milestone.
+Copy the helper ELF to `/data/wfm/wfm-7zip-helper.elf` on the PS5, then deploy the rebuilt RD Downloader ELF. Validate helper autostart through the local loader, ZIP extraction progress/output, visible password flow, one RAR password case and one multipart set. If helper socket or loader behavior differs on-console, record the observed result and adjust from that evidence. Recheck pause/resume and confirmed stop on real transfers.
 
 ## Reproduction commands
 
@@ -102,7 +103,7 @@ make host-test
 make
 ```
 
-With the local SDK installed, `make host-test` runs host checks and `make` uses `.deps/ps5-payload-sdk` automatically. For a forced target rebuild in this environment, use:
+With the local SDK installed, `make host-test` runs host checks and `make` uses `.deps/ps5-payload-sdk` automatically. Build the pinned WFM helper with `./scripts/build-wfm-helper.sh`. For a forced target rebuild in this environment, use:
 
 ```sh
 PS5_PAYLOAD_SDK="$PWD/.deps/ps5-payload-sdk" \

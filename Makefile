@@ -25,6 +25,7 @@ CFLAGS := -Wall -Wextra -Werror -O2 -pthread -Iinclude
 SOURCES := src/main.c src/core/range_plan.c src/core/space_plan.c src/core/archive.c src/core/queue.c src/core/output.c
 SOURCES += src/core/http_server.c
 SOURCES += src/core/http_client.c src/core/ps5_http_client.c
+SOURCES += src/core/wfm_client.c
 PS5_HTTP_LIBS := -lSceHttp -lSceSsl
 
 .PHONY: all clean host-test host-server host-run deploy
@@ -33,7 +34,7 @@ all: $(ELF)
 $(WEB_EMBED): web/index.html scripts/embed_web.py
 	python3 scripts/embed_web.py web/index.html $(WEB_EMBED)
 
-$(ELF): $(SOURCES) $(WEB_EMBED) src/core/ca_bundle_pem.inc include/rd/range_plan.h include/rd/space_plan.h include/rd/archive.h include/rd/queue.h include/rd/output.h include/rd/http_server.h include/rd/http_client.h
+$(ELF): $(SOURCES) $(WEB_EMBED) src/core/ca_bundle_pem.inc include/rd/range_plan.h include/rd/space_plan.h include/rd/archive.h include/rd/queue.h include/rd/output.h include/rd/http_server.h include/rd/http_client.h include/rd/wfm_client.h
 	$(CC) $(CFLAGS) -o $@ $(SOURCES) $(PS5_HTTP_LIBS)
 
 host-test:
@@ -51,9 +52,9 @@ host-test:
 	./build-http-tests
 	rm -f build-range-tests build-space-tests build-queue-tests build-http-tests
 
-host-server: src/main.c src/core/http_server.c src/core/http_client.c src/core/queue.c src/core/output.c src/core/archive.c $(WEB_EMBED) include/rd/http_server.h include/rd/http_client.h include/rd/queue.h include/rd/output.h include/rd/archive.h
+host-server: src/main.c src/core/http_server.c src/core/http_client.c src/core/queue.c src/core/output.c src/core/archive.c src/core/wfm_client.c $(WEB_EMBED) include/rd/http_server.h include/rd/http_client.h include/rd/queue.h include/rd/output.h include/rd/archive.h include/rd/wfm_client.h
 	$(HOST_CC) -std=c11 -D_DEFAULT_SOURCE -DRD_HOST_BUILD -Wall -Wextra -Werror -O2 -pthread -Iinclude \
-		src/main.c src/core/http_server.c src/core/http_client.c src/core/ps5_http_client.c src/core/queue.c src/core/output.c src/core/archive.c -o rd-downloader-host
+		src/main.c src/core/http_server.c src/core/http_client.c src/core/ps5_http_client.c src/core/wfm_client.c src/core/queue.c src/core/output.c src/core/archive.c -o rd-downloader-host
 
 host-run: host-server
 	./rd-downloader-host

@@ -3,6 +3,7 @@
 #include "rd/http_client.h"
 #include "rd/archive.h"
 #include "rd/output.h"
+#include "rd/wfm_client.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -20,7 +21,7 @@
 #define RD_HTTP_MAX_REQUEST 32768U
 #define RD_HTTP_MAX_BODY 16384U
 #define RD_HTTP_MAX_CLIENTS 8
-#define RD_HTTP_QUEUE_RESPONSE (RD_MAX_QUEUE_ITEMS * 1280U + 32U)
+#define RD_HTTP_QUEUE_RESPONSE (RD_MAX_QUEUE_ITEMS * 8192U + 32U)
 #define RD_PROGRESS_SAVE_INTERVAL (16ULL * 1024ULL * 1024ULL)
 #define RD_DOWNLOAD_WORKER_STACK (1024U * 1024U)
 #define RD_PASSWORD_HEADER_MAX 256U
@@ -38,6 +39,7 @@ static pthread_cond_t worker_condition = PTHREAD_COND_INITIALIZER;
 static int download_requested = 1;
 static int worker_started;
 static unsigned long active_download_id;
+static unsigned long active_extraction_id;
 
 #include "index_html.inc"
 
@@ -208,6 +210,30 @@ static int parse_add_form(const char *body, size_t length, char *urls, size_t ur
     return have_urls && have_extract && have_password ? 0 : -1;
 }
 
+static int json_escape(const char *input, char *output, size_t capacity) {
+    static const char hex[] = "0123456789abcdef";
+    size_t i, used = 0;
+    if (!capacity) return -1;
+    for (i = 0; input && input[i]; ++i) {
+        unsigned char c = (unsigned char)input[i];
+        if (c == '"' || c == '\\') {
+            if (used + 2U >= capacity) return -1;
+            output[used++] = '\\';
+            output[used++] = (char)c;
+        } else if (c < 0x20U) {
+            if (used + 6U >= capacity) return -1;
+            output[used++] = '\\'; output[used++] = 'u';
+            output[used++] = '0'; output[used++] = '0';
+            output[used++] = hex[c >> 4]; output[used++] = hex[c & 15U];
+        } else {
+            if (used + 1U >= capacity) return -1;
+            output[used++] = (char)c;
+        }
+    }
+    output[used] = '\0';
+    return (int)used;
+}
+
 static int send_queue(int fd) {
     static const char unavailable[] = "{\"error\":\"queue storage unavailable\"}\n";
     static const char no_memory[] = "{\"error\":\"out of memory\"}\n";
@@ -221,18 +247,29 @@ static int send_queue(int fd) {
         "application/json; charset=utf-8", no_memory, sizeof(no_memory) - 1U);
     pthread_mutex_lock(&queue_mutex);
     n = snprintf(body, RD_HTTP_QUEUE_RESPONSE,
-                 "{\"online\":true,\"dir\":\"%s\",\"canExtract\":false,\"items\":[",
+                 "{\"online\":true,\"dir\":\"%s\",\"canExtract\":true,\"items\":[",
                  RD_DOWNLOAD_DIRECTORY);
     if (n < 0 || (size_t)n >= RD_HTTP_QUEUE_RESPONSE) goto serialization_failed;
     used = (size_t)n;
     for (i = 0; i < server_queue.count; ++i) {
         const rd_queue_item *item = &server_queue.items[i];
+        rd_archive_name archive_name;
+        char filename_json[3072], current_file_json[3072], error_json[1537];
+        int is_archive = rd_classify_archive_name(item->filename, &archive_name) == 0 &&
+                         archive_name.kind != RD_ARCHIVE_NONE;
+        if (json_escape(item->filename, filename_json, sizeof(filename_json)) < 0 ||
+            json_escape(item->extraction_current_file, current_file_json,
+                        sizeof(current_file_json)) < 0 ||
+            json_escape(item->error, error_json, sizeof(error_json)) < 0) goto serialization_failed;
         n = snprintf(body + used, RD_HTTP_QUEUE_RESPONSE - used,
-            "%s{\"id\":%lu,\"filename\":\"%s\",\"state\":\"%s\",\"downloaded_bytes\":%llu,\"expected_bytes\":%llu,\"speed_bps\":%llu,\"average_bps\":%llu,\"eta_seconds\":%llu,\"extract\":%s,\"error\":\"%s\"}",
-            i ? "," : "", item->id, item->filename, rd_job_state_name(item->state),
+            "%s{\"id\":%lu,\"filename\":\"%s\",\"state\":\"%s\",\"downloaded_bytes\":%llu,\"expected_bytes\":%llu,\"speed_bps\":%llu,\"average_bps\":%llu,\"eta_seconds\":%llu,\"extract\":%s,\"archive\":%s,\"xDone\":%llu,\"xTotal\":%llu,\"xSpeed\":%llu,\"xAverage\":%llu,\"xETA\":%llu,\"xFile\":\"%s\",\"error\":\"%s\"}",
+            i ? "," : "", item->id, filename_json, rd_job_state_name(item->state),
             item->downloaded_bytes, item->expected_bytes, item->speed_bps,
             item->average_bps, item->eta_seconds,
-            item->extract_after_download ? "true" : "false", item->error);
+            item->extract_after_download ? "true" : "false", is_archive ? "true" : "false",
+            item->extraction_done_bytes, item->extraction_total_bytes,
+            item->extraction_speed_bps, item->extraction_average_bps,
+            item->extraction_eta_seconds, current_file_json, error_json);
         if (n < 0 || (size_t)n >= RD_HTTP_QUEUE_RESPONSE - used) goto serialization_failed;
         used += (size_t)n;
     }
@@ -260,6 +297,16 @@ static unsigned long long monotonic_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (unsigned long long)tv.tv_sec * 1000ULL + (unsigned long long)tv.tv_usec / 1000ULL;
+}
+
+static void copy_display_text(char *out, size_t capacity, const char *text) {
+    size_t i;
+    if (!capacity) return;
+    for (i = 0; text && text[i] && i + 1U < capacity; ++i) {
+        unsigned char c = (unsigned char)text[i];
+        out[i] = c < 0x20U || c == 0x7fU || c == '"' || c == '\\' ? '_' : (char)c;
+    }
+    out[i] = '\0';
 }
 
 static int record_progress(unsigned long long downloaded, unsigned long long expected,
@@ -328,39 +375,233 @@ static int finish_removal(rd_queue_item *item) {
     return rd_queue_remove(&server_queue, item->id);
 }
 
+typedef struct rd_extraction_context {
+    unsigned long id;
+    unsigned long long started_ms;
+    unsigned long long previous_ms;
+    unsigned long long previous_done;
+} rd_extraction_context;
+
+static int record_extraction_progress(uint64_t done, uint64_t total,
+                                      const char *current_file, void *opaque) {
+    rd_extraction_context *context = (rd_extraction_context *)opaque;
+    size_t i;
+    unsigned long long now = monotonic_ms();
+    int found = 0;
+    pthread_mutex_lock(&queue_mutex);
+    for (i = 0; i < server_queue.count; ++i) {
+        rd_queue_item *item = &server_queue.items[i];
+        if (item->id != context->id) continue;
+        if (item->state == RD_JOB_CANCELLED) break;
+        if (item->state != RD_JOB_EXTRACTING) break;
+        if (current_file) copy_display_text(item->extraction_current_file,
+                                            sizeof(item->extraction_current_file), current_file);
+        else {
+            item->extraction_done_bytes = done;
+            item->extraction_total_bytes = total;
+            if (context->previous_ms && now > context->previous_ms && done >= context->previous_done)
+                item->extraction_speed_bps =
+                    (done - context->previous_done) * 1000ULL / (now - context->previous_ms);
+            else item->extraction_speed_bps = 0;
+            item->extraction_average_bps = context->started_ms && now > context->started_ms ?
+                done * 1000ULL / (now - context->started_ms) : 0;
+            item->extraction_eta_seconds = total > done && item->extraction_speed_bps ?
+                (total - done) / item->extraction_speed_bps : 0;
+            context->previous_ms = now;
+            context->previous_done = done;
+        }
+        found = 1;
+        break;
+    }
+    pthread_mutex_unlock(&queue_mutex);
+    return found ? 0 : -1;
+}
+
+static int extraction_cancel_requested(void *opaque) {
+    rd_extraction_context *context = (rd_extraction_context *)opaque;
+    size_t i;
+    int cancelled = 1;
+    pthread_mutex_lock(&queue_mutex);
+    for (i = 0; i < server_queue.count; ++i) {
+        if (server_queue.items[i].id != context->id) continue;
+        cancelled = server_queue.items[i].state == RD_JOB_CANCELLED;
+        break;
+    }
+    pthread_mutex_unlock(&queue_mutex);
+    return cancelled;
+}
+
+static int queue_has_pending_downloads(void) {
+    size_t i;
+    for (i = 0; i < server_queue.count; ++i) {
+        rd_job_state state = server_queue.items[i].state;
+        if (state == RD_JOB_QUEUED || state == RD_JOB_DOWNLOADING || state == RD_JOB_PAUSED)
+            return 1;
+    }
+    return 0;
+}
+
+static int same_archive_set(const rd_queue_item *candidate, const rd_queue_item *other,
+                            const rd_archive_name *candidate_name) {
+    rd_archive_name other_name;
+    if (strcmp(candidate->destination, other->destination) != 0 ||
+        rd_classify_archive_name(other->filename, &other_name) != 0 ||
+        other_name.kind == RD_ARCHIVE_NONE) return 0;
+    return strcmp(candidate_name->first_volume, other_name.first_volume) == 0;
+}
+
+static rd_queue_item *find_extract_candidate(void) {
+    size_t i;
+    if (queue_has_pending_downloads()) return NULL;
+    for (i = 0; i < server_queue.count; ++i) {
+        rd_queue_item *item = &server_queue.items[i];
+        rd_archive_name archive_name;
+        size_t j;
+        int group_ready = 1;
+        if (item->state != RD_JOB_READY_TO_EXTRACT || !item->extract_after_download ||
+            (item->error[0] && strncmp(item->error,
+             "Extraction interrupted by payload restart", 42U) != 0) ||
+            rd_classify_archive_name(item->filename, &archive_name) != 0 ||
+            archive_name.kind == RD_ARCHIVE_NONE) continue;
+        if ((archive_name.kind == RD_ARCHIVE_RAR_MULTIPART_PART ||
+             archive_name.kind == RD_ARCHIVE_SPLIT_001) && archive_name.part_number > 1U)
+            continue;
+        if (archive_name.kind == RD_ARCHIVE_RAR_LEGACY_VOLUME) continue;
+        for (j = 0; j < server_queue.count; ++j) {
+            rd_queue_item *volume = &server_queue.items[j];
+            if (!same_archive_set(item, volume, &archive_name)) continue;
+            if (volume->state != RD_JOB_READY_TO_EXTRACT && volume->state != RD_JOB_COMPLETED) {
+                group_ready = 0;
+                break;
+            }
+        }
+        if (!group_ready) continue;
+        return item;
+    }
+    return NULL;
+}
+
+static void complete_archive_set(rd_queue_item *primary) {
+    rd_archive_name archive_name;
+    size_t i;
+    if (rd_classify_archive_name(primary->filename, &archive_name) != 0) return;
+    for (i = 0; i < server_queue.count; ++i) {
+        rd_queue_item *volume = &server_queue.items[i];
+        if (!same_archive_set(primary, volume, &archive_name) ||
+            (volume->state != RD_JOB_READY_TO_EXTRACT && volume->id != primary->id)) continue;
+        if (rd_queue_update(&server_queue, volume->id, RD_JOB_COMPLETED,
+                            volume->downloaded_bytes, volume->expected_bytes, "") == 0) {
+            volume = &server_queue.items[i];
+            volume->extraction_done_bytes = volume->extraction_total_bytes = 0;
+            volume->extraction_speed_bps = volume->extraction_average_bps =
+                volume->extraction_eta_seconds = 0;
+            volume->extraction_current_file[0] = '\0';
+            memset(volume->extraction_password, 0, sizeof(volume->extraction_password));
+        }
+    }
+}
+
 static void *download_worker(void *unused) {
     (void)unused;
     for (;;) {
         char url[RD_MAX_URL_LENGTH];
         char destination[512];
+        char archive_path[1024];
+        char extraction_destination[512];
+        char password[RD_MAX_PASSWORD_LENGTH];
         unsigned long id = 0;
         size_t i;
-        int result;
+        int result, extracting = 0;
         rd_progress_context progress;
+        rd_extraction_context extraction_progress;
         char error[256];
 
         pthread_mutex_lock(&queue_mutex);
-        while (!download_requested) pthread_cond_wait(&worker_condition, &queue_mutex);
-        for (i = 0; i < server_queue.count; ++i) {
-            rd_queue_item *item = &server_queue.items[i];
-            if (item->state != RD_JOB_QUEUED) continue;
-            if (rd_queue_update(&server_queue, item->id, RD_JOB_DOWNLOADING, 0, 0, "") != 0) {
-                item->state = RD_JOB_FAILED;
-                continue;
+        for (;;) {
+            if (download_requested) {
+                for (i = 0; i < server_queue.count; ++i) {
+                    rd_queue_item *item = &server_queue.items[i];
+                    if (item->state != RD_JOB_QUEUED) continue;
+                    if (rd_queue_update(&server_queue, item->id, RD_JOB_DOWNLOADING, 0, 0, "") != 0) {
+                        item->state = RD_JOB_FAILED;
+                        continue;
+                    }
+                    id = item->id;
+                    rd_http_begin(id);
+                    active_download_id = id;
+                    memcpy(url, item->url, sizeof(url));
+                    snprintf(destination, sizeof(destination), "%s", download_directory(item));
+                    break;
+                }
             }
-            id = item->id;
-            rd_http_begin(id);
-            active_download_id = id;
-            memcpy(url, item->url, sizeof(url));
-            snprintf(destination, sizeof(destination), "%s", download_directory(item));
-            break;
-        }
-        if (!id) {
+            if (id) break;
             download_requested = 0;
+            if (!queue_has_pending_downloads()) {
+                rd_queue_item *item = find_extract_candidate();
+                if (item) {
+                    rd_archive_name archive_name;
+                    (void)rd_classify_archive_name(item->filename, &archive_name);
+                    i = (size_t)(item - server_queue.items);
+                    id = item->id;
+                    snprintf(archive_path, sizeof(archive_path), "%s/%s",
+                             download_directory(item), item->filename);
+                    snprintf(extraction_destination, sizeof(extraction_destination), "%s",
+                             download_directory(item));
+                    snprintf(password, sizeof(password), "%s", item->extraction_password);
+                    (void)rd_queue_update(&server_queue, id, RD_JOB_EXTRACTING,
+                                          item->downloaded_bytes, item->expected_bytes, "");
+                    item = &server_queue.items[i];
+                    item->extraction_done_bytes = item->extraction_total_bytes = 0;
+                    item->extraction_speed_bps = item->extraction_average_bps =
+                        item->extraction_eta_seconds = 0;
+                    item->extraction_current_file[0] = '\0';
+                    active_extraction_id = id;
+                    extracting = 1;
+                    break;
+                }
+            }
+            pthread_cond_wait(&worker_condition, &queue_mutex);
+        }
+        pthread_mutex_unlock(&queue_mutex);
+
+        if (extracting) {
+            extraction_progress.id = id;
+            extraction_progress.started_ms = monotonic_ms();
+            extraction_progress.previous_ms = 0;
+            extraction_progress.previous_done = 0;
+            error[0] = '\0';
+            result = rd_wfm_extract(id, archive_path, extraction_destination, password,
+                                    record_extraction_progress, extraction_cancel_requested,
+                                    &extraction_progress,
+                                    error, sizeof(error));
+            memset(password, 0, sizeof(password));
+            pthread_mutex_lock(&queue_mutex);
+            active_extraction_id = 0;
+            for (i = 0; i < server_queue.count; ++i) {
+                rd_queue_item *item = &server_queue.items[i];
+                if (item->id != id) continue;
+                if (item->state == RD_JOB_CANCELLED) {
+                    (void)rd_queue_remove(&server_queue, id);
+                    break;
+                }
+                if (result == 0) complete_archive_set(item);
+                else {
+                    (void)rd_queue_update(&server_queue, id, RD_JOB_READY_TO_EXTRACT,
+                        item->downloaded_bytes, item->expected_bytes,
+                        error[0] ? error : "archive extraction failed");
+                    item = &server_queue.items[i];
+                    item->extraction_done_bytes = item->extraction_total_bytes = 0;
+                    item->extraction_speed_bps = item->extraction_average_bps =
+                        item->extraction_eta_seconds = 0;
+                    item->extraction_current_file[0] = '\0';
+                }
+                if (item->state == RD_JOB_COMPLETED)
+                    memset(item->extraction_password, 0, sizeof(item->extraction_password));
+                break;
+            }
             pthread_mutex_unlock(&queue_mutex);
             continue;
         }
-        pthread_mutex_unlock(&queue_mutex);
 
         progress.id = id;
         progress.last_persisted = 0;
@@ -386,9 +627,7 @@ static void *download_worker(void *unused) {
             rd_job_state final_state = result == 0 ?
                 ((item->extract_after_download && is_archive) ? RD_JOB_READY_TO_EXTRACT : RD_JOB_COMPLETED) :
                 RD_JOB_FAILED;
-            const char *final_error = result != 0 ? error :
-                ((item->extract_after_download && is_archive) ?
-                 "Downloaded; extraction helper is not integrated yet" : "");
+            const char *final_error = result != 0 ? error : "";
             if (result == 0 && discard_output(item, 0) != 0)
                 final_error = "Downloaded. Could not remove temporary file reference.";
             if (rd_queue_update(&server_queue, id,
@@ -576,9 +815,13 @@ static void handle_client(int fd) {
             char *end;
             unsigned long id = strtoul(path + 11, &end, 10);
             const char *action = *end == '/' ? end + 1 : "";
+            char retry_password[RD_PASSWORD_HEADER_MAX] = "";
+            int password_header = copy_header_value(request, "X-RD-Password",
+                                                   retry_password, sizeof(retry_password));
             size_t i;
             int found = 0, action_result = -1;
-            if (!command_header_ok(request) || !id || *end != '/' || !*action || body_length != 0) {
+            if (!command_header_ok(request) || !id || *end != '/' || !*action ||
+                body_length != 0 || password_header < 0) {
                 static const char error_body[] = "invalid queue action\n";
                 (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
                                     error_body, sizeof(error_body) - 1U);
@@ -598,16 +841,33 @@ static void handle_client(int fd) {
                             item->downloaded_bytes, item->expected_bytes, "");
                         if (next == RD_JOB_QUEUED) download_requested = 1;
                         pthread_cond_broadcast(&worker_condition);
-                    } else if (strcmp(action, "retry") == 0 && item->state == RD_JOB_FAILED && !active_download_id) {
+                    } else if (strcmp(action, "retry") == 0 && item->state == RD_JOB_FAILED &&
+                               !active_download_id && !active_extraction_id) {
                         if (discard_output(item, 0) == 0) {
                             item->legacy_partial = 0;
                             action_result = rd_queue_update(&server_queue, id, RD_JOB_QUEUED, 0, 0, "");
                             if (action_result == 0) {
                                 item = &server_queue.items[i];
                                 item->speed_bps = item->average_bps = item->eta_seconds = 0;
+                                if (password_header > 0)
+                                    snprintf(item->extraction_password,
+                                             sizeof(item->extraction_password), "%s", retry_password);
                                 download_requested = 1;
                                 pthread_cond_signal(&worker_condition);
                             }
+                        }
+                    } else if (strcmp(action, "retry") == 0 &&
+                               item->state == RD_JOB_READY_TO_EXTRACT && item->error[0] &&
+                               !active_extraction_id) {
+                        action_result = rd_queue_update(&server_queue, id, RD_JOB_READY_TO_EXTRACT,
+                            item->downloaded_bytes, item->expected_bytes, "");
+                        if (action_result == 0) {
+                            item = &server_queue.items[i];
+                            if (password_header > 0)
+                                snprintf(item->extraction_password, sizeof(item->extraction_password),
+                                         "%s", retry_password);
+                            download_requested = 1;
+                            pthread_cond_signal(&worker_condition);
                         }
                     }
                     break;
@@ -651,6 +911,10 @@ static void handle_client(int fd) {
                             remove_result = rd_queue_update(&server_queue, id, RD_JOB_CANCELLED,
                                 item->downloaded_bytes, item->expected_bytes, "Stopping download");
                             if (remove_result == 0) rd_http_cancel(id);
+                            pthread_cond_broadcast(&worker_condition);
+                        } else if (active_extraction_id == id) {
+                            remove_result = rd_queue_update(&server_queue, id, RD_JOB_CANCELLED,
+                                item->downloaded_bytes, item->expected_bytes, "Stopping extraction");
                             pthread_cond_broadcast(&worker_condition);
                         } else {
                             remove_result = finish_removal(item);

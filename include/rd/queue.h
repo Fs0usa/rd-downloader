@@ -35,6 +35,12 @@ typedef struct rd_queue_item {
     unsigned long long speed_bps;
     unsigned long long average_bps;
     unsigned long long eta_seconds;
+    unsigned long long extraction_done_bytes;
+    unsigned long long extraction_total_bytes;
+    unsigned long long extraction_speed_bps;
+    unsigned long long extraction_average_bps;
+    unsigned long long extraction_eta_seconds;
+    char extraction_current_file[512];
     int legacy_partial;
     int extract_after_download;
     /* Password is intentionally in-memory only and never serialized. */

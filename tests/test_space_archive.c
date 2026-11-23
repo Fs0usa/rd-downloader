@@ -18,8 +18,15 @@ static void test_archive(void) {
     assert(rd_classify_archive_name("/data/downloads/Game.part01.rar", &a) == 0);
     assert(a.kind == RD_ARCHIVE_RAR_MULTIPART_PART && a.part_number == 1);
     assert(rd_classify_archive_name("Game.part12.rar", &a) == 0);
-    assert(a.kind == RD_ARCHIVE_RAR_MULTIPART_PART && a.part_number == 12);
+    assert(a.kind == RD_ARCHIVE_RAR_MULTIPART_PART && a.part_number == 12 &&
+           strcmp(a.first_volume, "Game.part01.rar") == 0);
+    assert(rd_classify_archive_name("Game.r00", &a) == 0 &&
+           a.kind == RD_ARCHIVE_RAR_LEGACY_VOLUME && a.part_number == 1 &&
+           strcmp(a.first_volume, "Game.rar") == 0);
     assert(rd_classify_archive_name("Game.001", &a) == 0 && a.kind == RD_ARCHIVE_SPLIT_001);
+    assert(rd_classify_archive_name("Game.002", &a) == 0 &&
+           a.kind == RD_ARCHIVE_SPLIT_001 && a.part_number == 2 &&
+           strcmp(a.first_volume, "Game.001") == 0);
     assert(rd_classify_archive_name("Game.rar", &a) == 0 && a.kind == RD_ARCHIVE_RAR_SINGLE);
     assert(rd_classify_archive_name("Game.zip", &a) == 0 && a.kind == RD_ARCHIVE_ZIP);
 }

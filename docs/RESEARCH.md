@@ -1,6 +1,6 @@
 # Engineering research and audit
 
-Audit date: 2026-11-23. This file includes an initial bootstrap audit and later research updates; consult [`IMPLEMENTATION.md`](IMPLEMENTATION.md) for current project status. The SDK is now installed locally, the PS5 ELF cross-builds, and the user confirmed one direct HTTPS download on their PS5. The workspace still lacks pinned local checkouts for WFM helper and DebridDownloader, so those repositories have not received a full source/build audit here. Some statements below are historical snapshots and are explicitly superseded by the later implementation updates.
+Audit date: 2026-11-23. This file includes an initial bootstrap audit and later research updates; consult [`IMPLEMENTATION.md`](IMPLEMENTATION.md) for current project status. The SDK is installed locally, the PS5 ELF cross-builds, and the user confirmed one direct HTTPS download on their PS5. The first audit snapshot below predates local pinned WFM checkouts; the source verification update at the end records the later inspection. Some statements below are historical snapshots and are explicitly superseded by the later update.
 
 > Historical audit snapshot: the sections below record the initial bootstrap state. The implementation update at the end records what has since been built and tested in this workspace.
 
@@ -56,7 +56,7 @@ The official documentation gives the REST base URL `https://api.real-debrid.com/
 
 ## Dependency and platform compatibility
 
-The initial audit predates the current implementation. The project now builds with the SDK's `libSceHttp` and `libSceSsl`, and includes a native HTTP server, queue persistence and direct download transports. Host tests do not prove PS5 behavior. WFM helper and Real-Debrid dependencies remain unintegrated; see [`IMPLEMENTATION.md`](IMPLEMENTATION.md) for the remaining work.
+The initial audit predates the current implementation. The project now builds with the SDK's `libSceHttp` and `libSceSsl`, and includes a native HTTP server, queue persistence and direct download transports. Host tests do not prove PS5 behavior. At the time of that earlier snapshot, WFM helper and Real-Debrid remained unintegrated. See [`IMPLEMENTATION.md`](IMPLEMENTATION.md) for the remaining work.
 
 ## Unresolved risks / evidence still needed
 
@@ -68,6 +68,16 @@ The initial audit predates the current implementation. The project now builds wi
 6. Verify destination mounts, filesystem semantics, free-space reporting, write access and atomic rename on actual target hardware.
 7. Verify helper behavior and protocol against a pinned helper build, including password and multipart paths, output collision handling, and no-space recovery.
 8. Decide licensing/redistribution obligations before bundling SDK-linked payloads or helper binaries.
+
+## WFM source verification update (2026-11-23)
+
+Local checkouts were subsequently inspected: `owendswang/wfm-7zip-helper` at `7a8392ab4a743bcc941fc531c2f8c65f8cf57800`, and `owendswang/ps5-web-file-manager` at `734bda6a75c0594bf4221d337862e55973c7d267`. The helper checkout builds on Linux and with the installed PS5 Payload SDK using its `makefile.linux` and `makefile.ps5`; its README and source define the W7HP framing and task protocol described above. Its task state is retained in helper memory across client disconnects, but not across helper process restart. The task snapshots carry source/destination paths, state and progress, which allows the app to reattach after its own restart.
+
+The Web File Manager source confirms its helper deployment and startup contract in `src/archive_helper.c`: `/data/wfm/wfm-7zip-helper.elf`, local ELF loader `127.0.0.1:9021`, and `/system_tmp/wfm-7zip-helper.sock`. It checks PING before launch and deliberately avoids replacing a connected-but-unresponsive daemon. RD Downloader follows that startup safety behavior: it starts the helper only when the socket cannot be connected, and refuses to launch another copy if a connected socket fails PING. The helper ELF is separately built and must be installed at the expected path on the console.
+
+The PS5 helper build completed from the pinned checkout with the installed SDK. A Linux end-to-end check downloaded a ZIP through RD Downloader, extracted it through the Linux helper over W7HP, and verified the member at the expected host destination. Earlier direct helper smoke work also processed the supplied RAR sample. These checks confirm host IPC and path flow only; they do not establish PS5 socket namespace visibility, loader behavior, filesystem permissions or multipart/password compatibility on console. The helper includes UnRAR and 7-Zip source; review its `DOC/License.txt`, `DOC/unRarLicense.txt`, `README.md`, and `THIRD_PARTY_NOTICES.md` before redistribution. Do not bundle the helper ELF until those obligations are reviewed.
+
+Sources: [WFM helper protocol and build](https://github.com/owendswang/wfm-7zip-helper/tree/7a8392ab4a743bcc941fc531c2f8c65f8cf57800/CPP/7zip/Bundles/WfmHelper), [WFM Web File Manager archive-helper client](https://github.com/owendswang/ps5-web-file-manager/blob/734bda6a75c0594bf4221d337862e55973c7d267/src/archive_helper.c).
 
 ## Transport evaluation update
 

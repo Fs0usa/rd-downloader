@@ -84,7 +84,7 @@ static int load_queue(rd_queue *queue) {
         unsigned long long expected = 0, downloaded = 0;
         unsigned int state = (unsigned int)RD_JOB_QUEUED;
         char *error_hex = NULL;
-        int interrupted = 0;
+        int interrupted = 0, extraction_interrupted = 0;
         size_t n, i;
         rd_queue_item *item;
         if (!tab || !strchr(line, '\n') || queue->count >= RD_MAX_QUEUE_ITEMS) goto bad_file;
@@ -113,6 +113,10 @@ static int load_queue(rd_queue *queue) {
                 state = (unsigned int)RD_JOB_FAILED;
                 needs_save = 1;
                 interrupted = 1;
+            } else if (state == (unsigned int)RD_JOB_EXTRACTING) {
+                state = (unsigned int)RD_JOB_READY_TO_EXTRACT;
+                needs_save = 1;
+                extraction_interrupted = 1;
             }
         }
         item = &queue->items[queue->count];
@@ -173,6 +177,9 @@ static int load_queue(rd_queue *queue) {
             needs_save = 1;
             snprintf(item->error, sizeof(item->error), "Interrupted by payload restart; partial output kept");
         }
+        if (extraction_interrupted)
+            snprintf(item->error, sizeof(item->error),
+                     "Extraction interrupted by payload restart; checking helper task");
         if (version < 5)
             snprintf(item->destination, sizeof(item->destination), "%s", RD_DEFAULT_DESTINATION);
         n = strcspn(tab, "\r\n");
@@ -229,7 +236,8 @@ int rd_queue_add_batch_options(rd_queue *queue, const char (*urls)[RD_MAX_URL_LE
         snprintf(item->destination, sizeof(item->destination), "%s", RD_DEFAULT_DESTINATION);
         memcpy(item->url, urls[i], url_length + 1U);
         rd_download_filename(item->url, item->filename, sizeof(item->filename));
-        if (password && *password) snprintf(item->extraction_password, sizeof(item->extraction_password), "%s", password);
+        if (item->extract_after_download && password && *password)
+            snprintf(item->extraction_password, sizeof(item->extraction_password), "%s", password);
     }
     if (save_queue(candidate) != 0) { free(candidate); return -1; }
     *queue = *candidate;

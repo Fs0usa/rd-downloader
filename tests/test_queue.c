@@ -92,7 +92,7 @@ int main(void) {
                (const char (*)[RD_MAX_URL_LENGTH])urls, 1, 0, "secret") == 1);
         assert(strcmp(restored.items[2].filename, "My_Game.rar") == 0);
         assert(restored.items[2].extract_after_download == 0);
-        assert(strcmp(restored.items[2].extraction_password, "secret") == 0);
+        assert(restored.items[2].extraction_password[0] == '\0');
         assert(rd_queue_init(&q, path) == 0 && q.count == 3);
         assert(q.items[2].extract_after_download == 0);
         assert(q.items[2].extraction_password[0] == '\0');
