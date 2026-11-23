@@ -1,0 +1,7 @@
+*.elf
+rd-downloader-host
+*.o
+/build/
+/.deps/
+*.log
+config.local.json
