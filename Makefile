@@ -8,6 +8,7 @@ PS5_PAYLOAD_SDK := /opt/ps5-payload-sdk
 endif
 endif
 HOST_CC ?= cc
+CA_BUNDLE ?= /etc/ssl/certs/ca-certificates.crt
 
 HOST_GOALS := host-test host-server host-run
 ifeq ($(filter $(HOST_GOALS),$(MAKECMDGOALS)),)
@@ -33,6 +34,9 @@ all: $(ELF)
 
 $(WEB_EMBED): web/index.html scripts/embed_web.py
 	python3 scripts/embed_web.py web/index.html $(WEB_EMBED)
+
+src/core/ca_bundle_pem.inc: $(CA_BUNDLE) certs/real-debrid-geotrust-intermediate.pem scripts/embed-ca-bundle.py
+	python3 scripts/embed-ca-bundle.py $(CA_BUNDLE) $@ --extra certs/real-debrid-geotrust-intermediate.pem
 
 $(ELF): $(SOURCES) $(WEB_EMBED) src/core/ca_bundle_pem.inc include/rd/range_plan.h include/rd/space_plan.h include/rd/archive.h include/rd/queue.h include/rd/output.h include/rd/http_server.h include/rd/http_client.h include/rd/wfm_client.h
 	$(CC) $(CFLAGS) -o $@ $(SOURCES) $(PS5_HTTP_LIBS)
