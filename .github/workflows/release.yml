@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -45,8 +46,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          release_args=(--title "RD Downloader $GITHUB_REF_NAME" --generate-notes)
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            release_args+=(--prerelease)
+          fi
           gh release create "$GITHUB_REF_NAME" rd-downloader.elf rd-downloader.elf.sha256 \
-            --title "RD Downloader $GITHUB_REF_NAME" --generate-notes
+            "${release_args[@]}"
 
       - name: Update Payload Manager catalog
         env:

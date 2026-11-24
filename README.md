@@ -13,7 +13,7 @@ Native, single-user PS5 payload for queued direct-link downloads, optional Real-
 
 The workflow above describes the goal, not the current feature set.
 
-## Current implementation status (2026-11-24) — Beta 1.1.1
+## Current implementation status (2026-11-24) — Beta 1.1.2
 
 **Working PS5 HTTPS download checkpoint (v0.3.0).** The user confirmed that the HTTPS sample download completed on their PS5 with this build. The earlier HTTP service and persisted queue were also confirmed on-console. Current code includes:
 

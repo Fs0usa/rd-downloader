@@ -25,7 +25,7 @@ catalog = {
         {
             "name": "RD Downloader",
             "filename": "rd-downloader.elf",
-            "url": f"https://github.com/{args.repository}/releases/latest/download/rd-downloader.elf",
+            "url": f"https://github.com/{args.repository}/releases/download/{args.version}/rd-downloader.elf",
             "description": "PS5 HTTP/HTTPS download queue with optional archive extraction.",
             "version": args.version,
             "category": "Downloads",

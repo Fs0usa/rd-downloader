@@ -9,7 +9,7 @@ endif
 endif
 HOST_CC ?= cc
 CA_BUNDLE ?= /etc/ssl/certs/ca-certificates.crt
-RD_VERSION ?= $(shell cat VERSION 2>/dev/null || echo 1.1.1-beta)
+RD_VERSION ?= $(shell cat VERSION 2>/dev/null || echo 1.1.2-beta)
 VERSION_FLAGS := -DRD_DOWNLOADER_VERSION='"$(RD_VERSION)"'
 
 HOST_GOALS := host-test host-server host-run
@@ -40,7 +40,7 @@ $(WEB_EMBED): web/index.html scripts/embed_web.py
 src/core/ca_bundle_pem.inc: $(CA_BUNDLE) certs/real-debrid-geotrust-intermediate.pem scripts/embed-ca-bundle.py
 	python3 scripts/embed-ca-bundle.py $(CA_BUNDLE) $@ --extra certs/real-debrid-geotrust-intermediate.pem
 
-$(ELF): $(SOURCES) $(WEB_EMBED) src/core/ca_bundle_pem.inc include/rd/range_plan.h include/rd/space_plan.h include/rd/archive.h include/rd/queue.h include/rd/output.h include/rd/http_server.h include/rd/http_client.h include/rd/wfm_client.h
+$(ELF): $(SOURCES) $(WEB_EMBED) src/core/ca_bundle_pem.inc VERSION include/rd/version.h include/rd/range_plan.h include/rd/space_plan.h include/rd/archive.h include/rd/queue.h include/rd/output.h include/rd/http_server.h include/rd/http_client.h include/rd/wfm_client.h
 	$(CC) $(CFLAGS) -o $@ $(SOURCES) $(PS5_HTTP_LIBS)
 
 host-test:
@@ -58,7 +58,7 @@ host-test:
 	./build-http-tests
 	rm -f build-range-tests build-space-tests build-queue-tests build-http-tests
 
-host-server: src/main.c src/core/http_server.c src/core/http_client.c src/core/queue.c src/core/output.c src/core/archive.c src/core/wfm_client.c $(WEB_EMBED) include/rd/http_server.h include/rd/http_client.h include/rd/queue.h include/rd/output.h include/rd/archive.h include/rd/wfm_client.h
+host-server: src/main.c src/core/http_server.c src/core/http_client.c src/core/queue.c src/core/output.c src/core/archive.c src/core/wfm_client.c $(WEB_EMBED) VERSION include/rd/version.h include/rd/http_server.h include/rd/http_client.h include/rd/queue.h include/rd/output.h include/rd/archive.h include/rd/wfm_client.h
 	$(HOST_CC) -std=c11 -D_DEFAULT_SOURCE -DRD_HOST_BUILD -Wall -Wextra -Werror -O2 -pthread -Iinclude $(VERSION_FLAGS) \
 		src/main.c src/core/http_server.c src/core/http_client.c src/core/ps5_http_client.c src/core/wfm_client.c src/core/queue.c src/core/output.c src/core/archive.c -o rd-downloader-host
 
