@@ -1,8 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "rd/http_server.h"
-
-#define RD_DOWNLOADER_VERSION "1.1.1-dev"
+#include "rd/version.h"
 
 #ifndef RD_HOST_BUILD
 typedef struct rd_notification_request {

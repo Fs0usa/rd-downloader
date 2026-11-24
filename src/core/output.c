@@ -127,7 +127,12 @@ int rd_output_discard(const rd_output *out, int include_final) {
     unsigned long long device, inode;
     ssize_t length;
     int fd;
-    if (lstat(out->owner, &owner_st)) return errno == ENOENT ? 0 : -1;
+    if (lstat(out->owner, &owner_st)) {
+        if (errno != ENOENT || !include_final) return errno == ENOENT ? 0 : -1;
+        if (lstat(out->final, &owner_st) != 0) return errno == ENOENT ? 0 : -1;
+        if (!S_ISREG(owner_st.st_mode)) return -1;
+        return unlink(out->final);
+    }
     if (!S_ISREG(owner_st.st_mode)) return -1;
     fd = open(out->owner, O_RDONLY);
     if (fd < 0) return -1;

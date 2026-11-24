@@ -1,0 +1,69 @@
+name: Build and publish PS5 beta/release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates clang-18 lld-18 llvm-18 make python3 curl unzip
+
+      - name: Install pinned PS5 Payload SDK
+        run: |
+          mkdir -p "$RUNNER_TEMP/ps5-sdk"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            https://github.com/ps5-payload-dev/sdk/releases/download/v0.50/ps5-payload-sdk.zip \
+            -o "$RUNNER_TEMP/ps5-payload-sdk.zip"
+          printf '%s  %s\n' \
+            2993a69e52fea04a32bf1753318fc60b3f918ab635bdf946870e7d1849557bb2 \
+            "$RUNNER_TEMP/ps5-payload-sdk.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/ps5-payload-sdk.zip" -d "$RUNNER_TEMP"
+          test -x "$RUNNER_TEMP/ps5-payload-sdk/bin/prospero-clang"
+
+      - name: Build ELF
+        env:
+          PS5_PAYLOAD_SDK: ${{ runner.temp }}/ps5-payload-sdk
+          LLVM_CONFIG: /usr/bin/llvm-config-18
+          PATH: /usr/lib/llvm-18/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        run: |
+          make clean
+          make RD_VERSION="${GITHUB_REF_NAME#v}"
+          sha256sum rd-downloader.elf > rd-downloader.elf.sha256
+
+      - name: Publish release ELF
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" rd-downloader.elf rd-downloader.elf.sha256 \
+            --title "RD Downloader $GITHUB_REF_NAME" --generate-notes
+
+      - name: Update Payload Manager catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          digest="$(cut -d ' ' -f 1 rd-downloader.elf.sha256)"
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout "$DEFAULT_BRANCH"
+          python3 scripts/render-payload-catalog.py \
+            --repository "$REPOSITORY" --version "$VERSION" --sha256 "$digest"
+          if ! git diff --quiet -- payloads.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add payloads.json
+            git commit -m "Update Payload Manager catalog for $VERSION"
+            git push origin "$DEFAULT_BRANCH"
+          fi

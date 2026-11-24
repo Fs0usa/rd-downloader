@@ -5,3 +5,4 @@ rd-downloader-host
 /.deps/
 *.log
 config.local.json
+__pycache__/

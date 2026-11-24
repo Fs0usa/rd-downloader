@@ -4,6 +4,7 @@
 #include "rd/archive.h"
 #include "rd/output.h"
 #include "rd/wfm_client.h"
+#include "rd/version.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -18,15 +19,20 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define RD_HTTP_MAX_REQUEST 32768U
 #define RD_HTTP_MAX_BODY 16384U
 #define RD_HTTP_MAX_CLIENTS 8
+#define RD_HTTP_CLIENT_STACK (256U * 1024U)
+#define RD_HTTP_REQUEST_TIMEOUT_MS 15000ULL
 #define RD_HTTP_QUEUE_RESPONSE (RD_MAX_QUEUE_ITEMS * 8192U + 32U)
 #define RD_PROGRESS_SAVE_INTERVAL (16ULL * 1024ULL * 1024ULL)
 #define RD_DOWNLOAD_WORKER_STACK (1024U * 1024U)
 #define RD_PASSWORD_HEADER_MAX 256U
+#define RD_MAX_NESTED_ARCHIVES 64U
+#define RD_MAX_NESTED_DEPTH 3U
 
 #ifdef RD_HOST_BUILD
 #define RD_DOWNLOAD_DIRECTORY "/tmp/rd-downloader-host-downloads/downloads"
@@ -45,6 +51,11 @@ static int download_requested = 1;
 static int worker_started;
 static unsigned long active_download_id;
 static unsigned long active_extraction_id;
+static pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
+static unsigned int active_clients;
+
+static int same_archive_set(const rd_queue_item *candidate, const rd_queue_item *other,
+                            const rd_archive_name *candidate_name);
 
 #include "index_html.inc"
 
@@ -66,10 +77,10 @@ static int send_health(int fd) {
     pthread_mutex_unlock(&queue_mutex);
     length = snprintf(body, sizeof(body),
         "{\"status\":\"ok\",\"application\":\"rd-downloader\","
-        "\"version\":\"1.1.1-dev\",\"transport\":\"http-https\","
+        "\"version\":\"%s\",\"transport\":\"http-https\","
         "\"worker_ready\":%s,\"queue_ready\":%s,\"download_directory_ready\":%s,"
         "\"downloader_active\":%s}\n",
-        ready ? "true" : "false", queue_available ? "true" : "false",
+        RD_DOWNLOADER_VERSION, ready ? "true" : "false", queue_available ? "true" : "false",
         download_directory_available ? "true" : "false", active ? "true" : "false");
     if (length < 0 || (size_t)length >= sizeof(body)) return -1;
     return send_response(fd, 200, "OK", "application/json; charset=utf-8", body, (size_t)length);
@@ -91,6 +102,22 @@ static int send_all(int fd, const char *data, size_t length) {
         sent += (size_t)n;
     }
     return 0;
+}
+
+static unsigned long long monotonic_ms(void);
+
+static ssize_t recv_before_deadline(int fd, void *buffer, size_t capacity,
+                                    unsigned long long deadline_ms) {
+    struct timeval timeout;
+    unsigned long long now = monotonic_ms();
+    unsigned long long remaining;
+    if (now >= deadline_ms) { errno = ETIMEDOUT; return -1; }
+    remaining = deadline_ms - now;
+    timeout.tv_sec = (time_t)(remaining / 1000ULL);
+    timeout.tv_usec = (suseconds_t)((remaining % 1000ULL) * 1000ULL);
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0)
+        return -1;
+    return recv(fd, buffer, capacity, 0);
 }
 
 static int send_response(int fd, int status, const char *reason,
@@ -195,9 +222,10 @@ static int decode_form_value(const char *src, size_t length, char *out, size_t c
 
 static int parse_add_form(const char *body, size_t length, char *urls, size_t urls_capacity,
                           char *extract, size_t extract_capacity,
+                          char *nested, size_t nested_capacity,
                           char *password, size_t password_capacity) {
     size_t offset = 0;
-    int have_urls = 0, have_extract = 0, have_password = 0;
+    int have_urls = 0, have_extract = 0, have_nested = 0, have_password = 0;
     while (offset < length) {
         size_t end = offset, equal;
         char key[16];
@@ -211,13 +239,16 @@ static int parse_add_form(const char *body, size_t length, char *urls, size_t ur
         } else if (strcmp(key, "extract") == 0) {
             if (have_extract++ || equal == end || decode_form_value(body + equal + 1, end - equal - 1,
                 extract, extract_capacity, 0) != 0) return -1;
+        } else if (strcmp(key, "extractNested") == 0) {
+            if (have_nested++ || equal == end || decode_form_value(body + equal + 1, end - equal - 1,
+                nested, nested_capacity, 0) != 0) return -1;
         } else if (strcmp(key, "password") == 0) {
             if (have_password++ || equal == end || decode_form_value(body + equal + 1, end - equal - 1,
                 password, password_capacity, 0) != 0) return -1;
         } else return -1;
         offset = end + 1;
     }
-    return have_urls && have_extract && have_password ? 0 : -1;
+    return have_urls && have_extract && have_nested && have_password ? 0 : -1;
 }
 
 static int json_escape(const char *input, char *output, size_t capacity) {
@@ -242,6 +273,13 @@ static int json_escape(const char *input, char *output, size_t capacity) {
     }
     output[used] = '\0';
     return (int)used;
+}
+
+static size_t related_file_count_for_item(const rd_queue *queue, unsigned long id) {
+    size_t i, count = 0;
+    for (i = 0; i < queue->related_file_count; ++i)
+        if (queue->related_files[i].item_id == id) ++count;
+    return count;
 }
 
 static int send_queue(int fd) {
@@ -273,11 +311,15 @@ static int send_queue(int fd) {
                         sizeof(current_file_json)) < 0 ||
             json_escape(item->error, error_json, sizeof(error_json)) < 0) goto serialization_failed;
         n = snprintf(body + used, RD_HTTP_QUEUE_RESPONSE - used,
-            "%s{\"id\":%lu,\"filename\":\"%s\",\"state\":\"%s\",\"downloaded_bytes\":%llu,\"expected_bytes\":%llu,\"speed_bps\":%llu,\"average_bps\":%llu,\"eta_seconds\":%llu,\"extract\":%s,\"archive\":%s,\"xDone\":%llu,\"xTotal\":%llu,\"xSpeed\":%llu,\"xAverage\":%llu,\"xETA\":%llu,\"xFile\":\"%s\",\"error\":\"%s\"}",
+            "%s{\"id\":%lu,\"filename\":\"%s\",\"state\":\"%s\",\"downloaded_bytes\":%llu,\"expected_bytes\":%llu,\"speed_bps\":%llu,\"average_bps\":%llu,\"eta_seconds\":%llu,\"extract\":%s,\"extractNested\":%s,\"relatedFiles\":%lu,\"retryAttempts\":%u,\"retryAfter\":%llu,\"archive\":%s,\"xDone\":%llu,\"xTotal\":%llu,\"xSpeed\":%llu,\"xAverage\":%llu,\"xETA\":%llu,\"xFile\":\"%s\",\"error\":\"%s\"}",
             i ? "," : "", item->id, filename_json, rd_job_state_name(item->state),
             item->downloaded_bytes, item->expected_bytes, item->speed_bps,
             item->average_bps, item->eta_seconds,
-            item->extract_after_download ? "true" : "false", is_archive ? "true" : "false",
+            item->extract_after_download ? "true" : "false",
+            item->extract_nested_archives ? "true" : "false",
+            (unsigned long)related_file_count_for_item(&server_queue, item->id),
+            item->retry_attempts, item->retry_after_epoch,
+            is_archive ? "true" : "false",
             item->extraction_done_bytes, item->extraction_total_bytes,
             item->extraction_speed_bps, item->extraction_average_bps,
             item->extraction_eta_seconds, current_file_json, error_json);
@@ -305,9 +347,10 @@ typedef struct rd_progress_context {
 } rd_progress_context;
 
 static unsigned long long monotonic_ms(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (unsigned long long)tv.tv_sec * 1000ULL + (unsigned long long)tv.tv_usec / 1000ULL;
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (unsigned long long)ts.tv_sec * 1000ULL +
+           (unsigned long long)ts.tv_nsec / 1000000ULL;
 }
 
 static void copy_display_text(char *out, size_t capacity, const char *text) {
@@ -381,20 +424,110 @@ static int discard_output(const rd_queue_item *item, int include_final) {
     return rd_output_discard(&output, include_final);
 }
 
-static int finish_removal(rd_queue_item *item) {
-    if (discard_output(item, item->state == RD_JOB_CANCELLED)) return -1;
-    return rd_queue_remove(&server_queue, item->id);
+static int finish_removal(rd_queue_item *item, int delete_downloads) {
+    size_t i;
+    unsigned long item_id = item->id;
+    rd_output output;
+    const char *directory = download_directory(item);
+    if (delete_downloads && active_extraction_id && active_extraction_id != item_id) {
+        size_t active_index;
+        for (active_index = 0; active_index < server_queue.count; ++active_index) {
+            rd_queue_item *active_item = &server_queue.items[active_index];
+            rd_archive_name selected_name;
+            if (active_item->id != active_extraction_id ||
+                rd_classify_archive_name(item->filename, &selected_name) != 0 ||
+                !same_archive_set(item, active_item, &selected_name)) continue;
+            errno = EBUSY;
+            return -1;
+        }
+    }
+    if (item->legacy_partial) {
+        if (rd_http_reset_legacy_partial(item->url, directory, item->id) != 0) return -1;
+    } else if (rd_output_paths(&output, directory, item->url, item->id) != 0 ||
+               rd_output_discard(&output, !!delete_downloads) != 0) return -1;
+    if (delete_downloads) {
+        for (i = 0; i < server_queue.related_file_count; ++i) {
+            char path[768];
+            struct stat st;
+            int n;
+            if (server_queue.related_files[i].item_id != item->id) continue;
+            n = snprintf(path, sizeof(path), "%s/%s", RD_DOWNLOAD_DIRECTORY,
+                         server_queue.related_files[i].filename);
+            if (n < 0 || (size_t)n >= sizeof(path)) return -1;
+            if (lstat(path, &st) == 0) {
+                if (!S_ISREG(st.st_mode) || unlink(path) != 0) return -1;
+            } else if (errno != ENOENT) return -1;
+        }
+    }
+    if (delete_downloads) {
+        rd_archive_name archive_name;
+        if (rd_classify_archive_name(item->filename, &archive_name) == 0 &&
+            archive_name.kind != RD_ARCHIVE_NONE) {
+            unsigned long sibling_ids[RD_MAX_QUEUE_ITEMS];
+            size_t sibling_count = 0, j;
+            for (i = 0; i < server_queue.count; ++i) {
+                rd_queue_item *sibling = &server_queue.items[i];
+                if (sibling->id == item_id || !same_archive_set(item, sibling, &archive_name) ||
+                    (sibling->state != RD_JOB_COMPLETED && sibling->state != RD_JOB_FAILED &&
+                     sibling->state != RD_JOB_READY_TO_EXTRACT) ||
+                    active_download_id == sibling->id || active_extraction_id == sibling->id) continue;
+                sibling_ids[sibling_count++] = sibling->id;
+            }
+            for (j = 0; j < sibling_count; ++j) {
+                rd_queue_item *sibling = NULL;
+                for (i = 0; i < server_queue.count; ++i)
+                    if (server_queue.items[i].id == sibling_ids[j]) { sibling = &server_queue.items[i]; break; }
+                if (!sibling) continue;
+                if (sibling->legacy_partial) {
+                    if (rd_http_reset_legacy_partial(sibling->url,
+                            download_directory(sibling), sibling->id) != 0) return -1;
+                } else {
+                    rd_output sibling_output;
+                    if (rd_output_paths(&sibling_output, download_directory(sibling),
+                                        sibling->url, sibling->id) != 0 ||
+                        rd_output_discard(&sibling_output, 1) != 0) return -1;
+                }
+                for (i = 0; i < server_queue.related_file_count; ++i) {
+                    char path[768];
+                    struct stat st;
+                    int n;
+                    if (server_queue.related_files[i].item_id != sibling_ids[j]) continue;
+                    n = snprintf(path, sizeof(path), "%s/%s", RD_DOWNLOAD_DIRECTORY,
+                                 server_queue.related_files[i].filename);
+                    if (n < 0 || (size_t)n >= sizeof(path)) return -1;
+                    if (lstat(path, &st) == 0) {
+                        if (!S_ISREG(st.st_mode) || unlink(path) != 0) return -1;
+                    } else if (errno != ENOENT) return -1;
+                }
+                if (rd_queue_remove(&server_queue, sibling_ids[j]) != 0) return -1;
+            }
+        }
+    }
+    return rd_queue_remove(&server_queue, item_id);
 }
 
 typedef struct rd_extraction_context {
     unsigned long id;
+    unsigned int source_scope_hash;
     unsigned long long started_ms;
     unsigned long long previous_ms;
     unsigned long long previous_done;
     size_t package_count;
     int package_overflow;
     char package_paths[64][512];
+    size_t archive_count;
+    int archive_overflow;
+    char archive_paths[RD_MAX_NESTED_ARCHIVES][512];
 } rd_extraction_context;
+
+typedef struct rd_nested_job {
+    char path[768];
+    unsigned int depth;
+} rd_nested_job;
+
+static int safe_relative_member(const char *path);
+static int copy_package_without_overwrite(const char *source, const char *target,
+                                          rd_extraction_context *context);
 
 static int is_package_path(const char *path) {
     const char *base = strrchr(path, '/');
@@ -424,6 +557,22 @@ static void remember_package_path(rd_extraction_context *context, const char *pa
              sizeof(context->package_paths[0]), "%s", path);
 }
 
+static void remember_archive_path(rd_extraction_context *context, const char *path) {
+    rd_archive_name parsed;
+    size_t i;
+    if (!path || !*path || rd_classify_archive_name(path, &parsed) != 0 ||
+        parsed.kind == RD_ARCHIVE_NONE) return;
+    for (i = 0; i < context->archive_count; ++i)
+        if (strcmp(context->archive_paths[i], path) == 0) return;
+    if (context->archive_count >= RD_MAX_NESTED_ARCHIVES ||
+        strlen(path) >= sizeof(context->archive_paths[0])) {
+        context->archive_overflow = 1;
+        return;
+    }
+    snprintf(context->archive_paths[context->archive_count++],
+             sizeof(context->archive_paths[0]), "%s", path);
+}
+
 static int record_extraction_progress(uint64_t done, uint64_t total,
                                       const char *current_file, void *opaque) {
     rd_extraction_context *context = (rd_extraction_context *)opaque;
@@ -440,6 +589,7 @@ static int record_extraction_progress(uint64_t done, uint64_t total,
             copy_display_text(item->extraction_current_file,
                               sizeof(item->extraction_current_file), current_file);
             remember_package_path(context, current_file);
+            remember_archive_path(context, current_file);
         }
         else {
             item->extraction_done_bytes = done;
@@ -460,6 +610,98 @@ static int record_extraction_progress(uint64_t done, uint64_t total,
     }
     pthread_mutex_unlock(&queue_mutex);
     return found ? 0 : -1;
+}
+
+static unsigned int relative_path_hash(const char *path) {
+    unsigned int hash = 2166136261U;
+    while (*path) { hash ^= (unsigned char)*path++; hash *= 16777619U; }
+    return hash;
+}
+
+static int move_extracted_archives(rd_extraction_context *context,
+                                   const char *destination,
+                                   rd_nested_job *jobs, size_t *job_count,
+                                   unsigned int depth,
+                                   char *warning, size_t warning_capacity) {
+    size_t i;
+    unsigned int failed = context->archive_overflow ? 1U : 0U;
+    for (i = 0; i < context->archive_count; ++i) {
+        const char *relative = context->archive_paths[i];
+        const char *base;
+        rd_archive_name archive_name;
+        char source[1024], filename[256], target[768], safe_base[180], group_path[512];
+        const char *relative_slash;
+        size_t j, used = 0;
+        int n, known, target_existed = 0;
+        if (!safe_relative_member(relative) ||
+            rd_classify_archive_name(relative, &archive_name) != 0 ||
+            archive_name.kind == RD_ARCHIVE_NONE) { ++failed; continue; }
+        relative_slash = strrchr(relative, '/');
+        n = snprintf(group_path, sizeof(group_path), "%.*s%s",
+                     relative_slash ? (int)(relative_slash + 1 - relative) : 0,
+                     relative, archive_name.first_volume);
+        if (n < 0 || (size_t)n >= sizeof(group_path)) { ++failed; continue; }
+        base = strrchr(relative, '/');
+        base = base ? base + 1 : relative;
+        for (j = 0; base[j] && used + 1U < sizeof(safe_base); ++j) {
+            unsigned char c = (unsigned char)base[j];
+            safe_base[used++] = (isalnum(c) || c == '.' || c == '_' || c == '-') ? (char)c : '_';
+        }
+        safe_base[used] = '\0';
+        if (!used) { ++failed; continue; }
+        n = snprintf(source, sizeof(source), "%s/%s", destination, relative);
+        if (n < 0 || (size_t)n >= sizeof(source)) { ++failed; continue; }
+        n = snprintf(filename, sizeof(filename), "rd-%lu-%08x-%s",
+                     context->id,
+                     relative_path_hash(group_path) ^ context->source_scope_hash,
+                     safe_base);
+        if (n < 0 || (size_t)n >= sizeof(filename)) { ++failed; continue; }
+        n = snprintf(target, sizeof(target), "%s/%s", RD_DOWNLOAD_DIRECTORY, filename);
+        if (n < 0 || (size_t)n >= sizeof(target)) { ++failed; continue; }
+        pthread_mutex_lock(&queue_mutex);
+        known = rd_queue_has_related_file(&server_queue, context->id, filename);
+        pthread_mutex_unlock(&queue_mutex);
+        {
+            struct stat st;
+            if (lstat(target, &st) == 0) {
+                if (!known || !S_ISREG(st.st_mode)) { ++failed; continue; }
+                target_existed = 1;
+            } else if (errno != ENOENT) { ++failed; continue; }
+            else {
+                if (copy_package_without_overwrite(source, target, context) != 0) {
+                    if (errno == ECANCELED) return -1;
+                    ++failed;
+                    continue;
+                }
+                pthread_mutex_lock(&queue_mutex);
+                n = rd_queue_record_related_file(&server_queue, context->id, filename);
+                pthread_mutex_unlock(&queue_mutex);
+                if (n != 0) { unlink(target); ++failed; continue; }
+            }
+            /* If recovery finds a previously recorded copy, preserve the source
+               too: its contents may have changed since that copy was made. */
+            if (!target_existed && unlink(source) != 0 && errno != ENOENT) {
+                ++failed;
+                continue;
+            }
+        }
+        if (jobs && job_count && depth < RD_MAX_NESTED_DEPTH &&
+            archive_name.kind != RD_ARCHIVE_RAR_LEGACY_VOLUME &&
+            !(archive_name.kind == RD_ARCHIVE_RAR_MULTIPART_PART && archive_name.part_number > 1U) &&
+            !(archive_name.kind == RD_ARCHIVE_SPLIT_001 && archive_name.part_number > 1U) &&
+            *job_count < RD_MAX_NESTED_ARCHIVES) {
+            snprintf(jobs[*job_count].path, sizeof(jobs[*job_count].path), "%s", target);
+            jobs[*job_count].depth = depth + 1U;
+            ++*job_count;
+        } else if (jobs && job_count && depth < RD_MAX_NESTED_DEPTH) {
+            ++failed;
+        }
+    }
+    if (failed && warning && warning_capacity)
+        snprintf(warning, warning_capacity,
+                 "%u nested archive file(s) could not be moved into downloads",
+                 failed);
+    return failed ? -1 : 0;
 }
 
 static int extraction_cancel_requested(void *opaque) {
@@ -566,8 +808,24 @@ static int queue_has_pending_downloads(void) {
     size_t i;
     for (i = 0; i < server_queue.count; ++i) {
         rd_job_state state = server_queue.items[i].state;
-        if (state == RD_JOB_QUEUED || state == RD_JOB_DOWNLOADING || state == RD_JOB_PAUSED)
+        if (state == RD_JOB_QUEUED || state == RD_JOB_DOWNLOADING || state == RD_JOB_PAUSED ||
+            state == RD_JOB_WAITING_FOR_NETWORK)
             return 1;
+    }
+    return 0;
+}
+
+static int is_retryable_download_error(const char *error) {
+    const char *status;
+    int code;
+    if (!error) return 0;
+    if (strstr(error, "timeout") || strstr(error, "DNS") || strstr(error, "connection") ||
+        strstr(error, "connect") || strstr(error, "interrupted") || strstr(error, "TLS") ||
+        strstr(error, "verification failed") || strstr(error, "stream")) return 1;
+    status = strstr(error, "server returned HTTP status ");
+    if (status) {
+        code = atoi(status + strlen("server returned HTTP status "));
+        return code == 408 || code == 425 || code == 429 || (code >= 500 && code <= 599);
     }
     return 0;
 }
@@ -647,9 +905,23 @@ static void *download_worker(void *unused) {
         rd_extraction_context extraction_progress;
         char error[256];
         char package_warning[256] = "";
+        char nested_warning[256] = "";
+        rd_nested_job nested_jobs[RD_MAX_NESTED_ARCHIVES];
+        size_t nested_job_count = 0, nested_cursor = 0;
+        int extract_nested = 0;
+        unsigned int nested_failures = 0;
 
         pthread_mutex_lock(&queue_mutex);
         for (;;) {
+            time_t wall_now = time(NULL);
+            for (i = 0; i < server_queue.count; ++i) {
+                rd_queue_item *retry = &server_queue.items[i];
+                if (retry->state == RD_JOB_WAITING_FOR_NETWORK &&
+                    retry->retry_after_epoch <= (unsigned long long)wall_now) {
+                    if (rd_queue_update(&server_queue, retry->id, RD_JOB_QUEUED, 0, 0, "") == 0)
+                        download_requested = 1;
+                }
+            }
             if (download_requested && download_directory_ready) {
                 for (i = 0; i < server_queue.count; ++i) {
                     rd_queue_item *item = &server_queue.items[i];
@@ -680,6 +952,7 @@ static void *download_worker(void *unused) {
                     snprintf(extraction_destination, sizeof(extraction_destination), "%s",
                              RD_EXTRACTION_DIRECTORY);
                     snprintf(password, sizeof(password), "%s", item->extraction_password);
+                    extract_nested = item->extract_nested_archives;
                     (void)rd_queue_update(&server_queue, id, RD_JOB_EXTRACTING,
                                           item->downloaded_bytes, item->expected_bytes, "");
                     item = &server_queue.items[i];
@@ -692,22 +965,80 @@ static void *download_worker(void *unused) {
                     break;
                 }
             }
-            pthread_cond_wait(&worker_condition, &queue_mutex);
+            {
+                unsigned long long next_retry = 0;
+                struct timespec wake_at;
+                wall_now = time(NULL);
+                for (i = 0; i < server_queue.count; ++i) {
+                    const rd_queue_item *retry = &server_queue.items[i];
+                    if (retry->state == RD_JOB_WAITING_FOR_NETWORK &&
+                        retry->retry_after_epoch > (unsigned long long)wall_now &&
+                        (!next_retry || retry->retry_after_epoch < next_retry))
+                        next_retry = retry->retry_after_epoch;
+                }
+                if (next_retry) {
+                    wake_at.tv_sec = (time_t)next_retry;
+                    wake_at.tv_nsec = 0;
+                    (void)pthread_cond_timedwait(&worker_condition, &queue_mutex, &wake_at);
+                    download_requested = 1;
+                } else pthread_cond_wait(&worker_condition, &queue_mutex);
+            }
         }
         pthread_mutex_unlock(&queue_mutex);
 
         if (extracting) {
             memset(&extraction_progress, 0, sizeof(extraction_progress));
             extraction_progress.id = id;
+            extraction_progress.source_scope_hash = relative_path_hash(archive_path);
             extraction_progress.started_ms = monotonic_ms();
             error[0] = '\0';
             result = rd_wfm_extract(id, archive_path, extraction_destination, password,
                                     record_extraction_progress, extraction_cancel_requested,
                                     &extraction_progress,
                                     error, sizeof(error));
-            if (result == 0)
+            if (result == 0) {
                 promote_extracted_packages(&extraction_progress, extraction_destination,
                                            package_warning, sizeof(package_warning));
+                if (move_extracted_archives(&extraction_progress, extraction_destination,
+                        extract_nested ? nested_jobs : NULL,
+                        extract_nested ? &nested_job_count : NULL, 0,
+                        nested_warning, sizeof(nested_warning)) != 0 && result == 0)
+                    nested_failures++;
+            }
+            while (result == 0 && extract_nested && nested_cursor < nested_job_count) {
+                rd_nested_job job = nested_jobs[nested_cursor++];
+                rd_extraction_context child_progress;
+                char child_error[256] = "";
+                memset(&child_progress, 0, sizeof(child_progress));
+                child_progress.id = id;
+                child_progress.source_scope_hash = relative_path_hash(job.path);
+                child_progress.started_ms = monotonic_ms();
+                if (rd_wfm_extract(id, job.path, extraction_destination, password,
+                        record_extraction_progress, extraction_cancel_requested,
+                        &child_progress, child_error, sizeof(child_error)) == 0) {
+                    char child_warning[256] = "";
+                    promote_extracted_packages(&child_progress, extraction_destination,
+                                               child_warning, sizeof(child_warning));
+                    if (child_warning[0] && !package_warning[0])
+                        snprintf(package_warning, sizeof(package_warning), "%s", child_warning);
+                    if (move_extracted_archives(&child_progress, extraction_destination,
+                            nested_jobs, &nested_job_count, job.depth,
+                            nested_warning, sizeof(nested_warning)) != 0)
+                        nested_failures++;
+                } else {
+                    nested_failures++;
+                    fprintf(stderr, "RD Downloader: nested archive extraction failed for queue item %lu: %s\n",
+                            id, child_error);
+                    if (move_extracted_archives(&child_progress, extraction_destination,
+                            NULL, NULL, job.depth, nested_warning,
+                            sizeof(nested_warning)) != 0)
+                        nested_failures++;
+                }
+            }
+            if (nested_failures && !nested_warning[0])
+                snprintf(nested_warning, sizeof(nested_warning),
+                         "%u nested archive(s) were kept in downloads because extraction failed",
+                         nested_failures);
             memset(password, 0, sizeof(password));
             pthread_mutex_lock(&queue_mutex);
             active_extraction_id = 0;
@@ -715,14 +1046,24 @@ static void *download_worker(void *unused) {
                 rd_queue_item *item = &server_queue.items[i];
                 if (item->id != id) continue;
                 if (item->state == RD_JOB_CANCELLED) {
-                    (void)rd_queue_remove(&server_queue, id);
+                    if (finish_removal(item, item->remove_downloads_on_cancel) != 0)
+                        (void)rd_queue_update(&server_queue, id, RD_JOB_FAILED,
+                            item->downloaded_bytes, item->expected_bytes,
+                            "Cleanup failed. Remove again to retry cleanup.");
                     break;
                 }
                 if (result == 0) {
                     complete_archive_set(item);
-                    if (package_warning[0])
+                    if (package_warning[0] || nested_warning[0]) {
+                        char completion_warning[256];
+                        if (package_warning[0] && nested_warning[0])
+                            snprintf(completion_warning, sizeof(completion_warning), "%.120s; %.120s",
+                                     package_warning, nested_warning);
+                        else snprintf(completion_warning, sizeof(completion_warning), "%s",
+                                      package_warning[0] ? package_warning : nested_warning);
                         (void)rd_queue_update(&server_queue, id, RD_JOB_COMPLETED,
-                            item->downloaded_bytes, item->expected_bytes, package_warning);
+                            item->downloaded_bytes, item->expected_bytes, completion_warning);
+                    }
                 }
                 else {
                     (void)rd_queue_update(&server_queue, id, RD_JOB_READY_TO_EXTRACT,
@@ -756,8 +1097,10 @@ static void *download_worker(void *unused) {
             rd_queue_item *item = &server_queue.items[i];
             if (item->id != id) continue;
             if (item->state == RD_JOB_CANCELLED) {
-                if (finish_removal(item))
-                    snprintf(item->error, sizeof(item->error), "Cleanup failed. Confirm removal to retry.");
+                if (finish_removal(item, item->remove_downloads_on_cancel))
+                    (void)rd_queue_update(&server_queue, id, RD_JOB_FAILED,
+                        item->downloaded_bytes, item->expected_bytes,
+                        "Cleanup failed. Remove again to retry cleanup.");
                 break;
             }
             rd_archive_name archive_name;
@@ -767,12 +1110,30 @@ static void *download_worker(void *unused) {
                 ((item->extract_after_download && is_archive) ? RD_JOB_READY_TO_EXTRACT : RD_JOB_COMPLETED) :
                 RD_JOB_FAILED;
             const char *final_error = result != 0 ? error : "";
-            if (result == 0 && discard_output(item, 0) != 0)
-                final_error = "Downloaded. Could not remove temporary file reference.";
-            if (rd_queue_update(&server_queue, id,
-                    final_state,
-                    item->downloaded_bytes, item->expected_bytes,
-                    final_error) != 0) {
+            int state_result;
+            if (result != 0 && is_retryable_download_error(error) && item->retry_attempts < 5U) {
+                unsigned int attempts = item->retry_attempts + 1U;
+                unsigned int delay_seconds = 5U << (attempts - 1U);
+                char retry_message[sizeof(item->error)];
+                if (delay_seconds > 300U) delay_seconds = 300U;
+                if (discard_output(item, 0) != 0) {
+                    state_result = rd_queue_set_retry(&server_queue, id, attempts, 0,
+                        RD_JOB_FAILED, "Download failed; partial file cleanup failed");
+                } else {
+                    unsigned long long retry_at = (unsigned long long)time(NULL) + delay_seconds;
+                    snprintf(retry_message, sizeof(retry_message),
+                             "Retry %u/5 in %u seconds after a temporary connection error",
+                             attempts, delay_seconds);
+                    state_result = rd_queue_set_retry(&server_queue, id, attempts, retry_at,
+                                                       RD_JOB_WAITING_FOR_NETWORK, retry_message);
+                }
+            } else if (result == 0) {
+                state_result = rd_queue_set_retry(&server_queue, id, 0, 0, final_state, "");
+            } else {
+                state_result = rd_queue_set_retry(&server_queue, id, item->retry_attempts, 0,
+                                                   RD_JOB_FAILED, final_error);
+            }
+            if (state_result != 0) {
                 item->state = RD_JOB_FAILED;
             }
             break;
@@ -787,11 +1148,13 @@ static void handle_client(int fd) {
     size_t used = 0;
     const char *end_headers = NULL;
     size_t body_length = 0, body_offset;
-    struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
+    struct timeval send_timeout = { .tv_sec = 5, .tv_usec = 0 };
+    unsigned long long deadline_ms = monotonic_ms() + RD_HTTP_REQUEST_TIMEOUT_MS;
 
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
     while (used < RD_HTTP_MAX_REQUEST) {
-        ssize_t n = recv(fd, request + used, RD_HTTP_MAX_REQUEST - used, 0);
+        ssize_t n = recv_before_deadline(fd, request + used,
+                                         RD_HTTP_MAX_REQUEST - used, deadline_ms);
         if (n < 0) {
             if (errno == EINTR) continue;
             return;
@@ -853,6 +1216,9 @@ static void handle_client(int fd) {
                                     error_body, sizeof(error_body) - 1U);
             } else {
                 pthread_mutex_lock(&queue_mutex);
+                for (size_t i = 0; i < server_queue.count; ++i)
+                    if (server_queue.items[i].state == RD_JOB_COMPLETED)
+                        (void)discard_output(&server_queue.items[i], 0);
                 cleared = rd_queue_clear_completed(&server_queue);
                 pthread_mutex_unlock(&queue_mutex);
                 if (cleared < 0) {
@@ -866,6 +1232,7 @@ static void handle_client(int fd) {
             char urls[4][RD_MAX_URL_LENGTH];
             char password[RD_PASSWORD_HEADER_MAX] = "";
             char extract_setting[8] = "1";
+            char nested_setting[8] = "0";
             char url_batch[RD_HTTP_MAX_BODY + 1U];
             int extract_enabled = 1;
             int form_request = strcmp(path, "/api/add") == 0;
@@ -885,7 +1252,8 @@ static void handle_client(int fd) {
             if (received > body_length) received = body_length;
             used = body_offset + received;
             while (received < body_length) {
-                ssize_t got = recv(fd, request + used, body_length - received, 0);
+                ssize_t got = recv_before_deadline(fd, request + used,
+                                                   body_length - received, deadline_ms);
                 if (got <= 0) return;
                 used += (size_t)got;
                 received += (size_t)got;
@@ -899,7 +1267,8 @@ static void handle_client(int fd) {
             request[body_offset + body_length] = '\0';
             if (form_request) {
                 if (parse_add_form(request + body_offset, body_length, url_batch, sizeof(url_batch),
-                                   extract_setting, sizeof(extract_setting), password, sizeof(password)) != 0) {
+                                   extract_setting, sizeof(extract_setting), nested_setting,
+                                   sizeof(nested_setting), password, sizeof(password)) != 0) {
                     static const char error_body[] = "invalid add form\n";
                     (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
                                         error_body, sizeof(error_body) - 1U);
@@ -920,6 +1289,12 @@ static void handle_client(int fd) {
                                     error_body, sizeof(error_body) - 1U);
                 return;
             }
+            if (strcmp(nested_setting, "0") != 0 && strcmp(nested_setting, "1") != 0) {
+                static const char error_body[] = "invalid nested extraction option\n";
+                (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
+                                    error_body, sizeof(error_body) - 1U);
+                return;
+            }
             if (!queue_ready || !worker_started) {
                 static const char error_body[] = "download worker or queue unavailable\n";
                 (void)send_response(fd, 503, "Service Unavailable", "text/plain", error_body, sizeof(error_body)-1);
@@ -934,9 +1309,10 @@ static void handle_client(int fd) {
             } else {
                 int add_result;
                 pthread_mutex_lock(&queue_mutex);
-                add_result = rd_queue_add_batch_options(&server_queue,
+                add_result = rd_queue_add_batch_preferences(&server_queue,
                     (const char (*)[RD_MAX_URL_LENGTH])urls, (size_t)count,
-                    extract_enabled, password);
+                    extract_enabled, extract_enabled && strcmp(nested_setting, "1") == 0,
+                    password);
                 if (add_result >= 0) {
                     download_requested = 1;
                     pthread_cond_signal(&worker_condition);
@@ -971,20 +1347,22 @@ static void handle_client(int fd) {
                     if (item->id != id) continue;
                     found = 1;
                     if (strcmp(action, "pause") == 0 &&
-                        (item->state == RD_JOB_QUEUED || item->state == RD_JOB_DOWNLOADING)) {
-                        action_result = rd_queue_update(&server_queue, id, RD_JOB_PAUSED,
-                            item->downloaded_bytes, item->expected_bytes, "");
+                        (item->state == RD_JOB_QUEUED || item->state == RD_JOB_DOWNLOADING ||
+                         item->state == RD_JOB_WAITING_FOR_NETWORK)) {
+                        action_result = rd_queue_set_retry(&server_queue, id,
+                            item->retry_attempts, 0, RD_JOB_PAUSED, "");
                     } else if (strcmp(action, "resume") == 0 && item->state == RD_JOB_PAUSED) {
                         rd_job_state next = active_download_id == id ? RD_JOB_DOWNLOADING : RD_JOB_QUEUED;
-                        action_result = rd_queue_update(&server_queue, id, next,
-                            item->downloaded_bytes, item->expected_bytes, "");
+                        action_result = rd_queue_set_retry(&server_queue, id,
+                            0, 0, next, "");
                         if (next == RD_JOB_QUEUED) download_requested = 1;
                         pthread_cond_broadcast(&worker_condition);
                     } else if (strcmp(action, "retry") == 0 && item->state == RD_JOB_FAILED &&
                                !active_download_id && !active_extraction_id) {
                         if (discard_output(item, 0) == 0) {
                             item->legacy_partial = 0;
-                            action_result = rd_queue_update(&server_queue, id, RD_JOB_QUEUED, 0, 0, "");
+                            action_result = rd_queue_set_retry(&server_queue, id, 0, 0,
+                                                               RD_JOB_QUEUED, "");
                             if (action_result == 0) {
                                 item = &server_queue.items[i];
                                 item->speed_bps = item->average_bps = item->eta_seconds = 0;
@@ -1024,10 +1402,20 @@ static void handle_client(int fd) {
             }
         } else if (strcmp(method, "DELETE") == 0 && strncmp(path, "/api/queue/", 11) == 0) {
             char *end;
+            char *query = strchr(path, '?');
             unsigned long id;
+            int delete_files = 0;
+            if (query) {
+                *query++ = '\0';
+                delete_files = strcmp(query, "deleteFiles=1") == 0;
+            }
             if (!command_header_ok(request)) {
                 static const char error_body[] = "command header required\n";
                 (void)send_response(fd, 403, "Forbidden", "text/plain; charset=utf-8",
+                                    error_body, sizeof(error_body) - 1U);
+            } else if (query && !delete_files) {
+                static const char error_body[] = "invalid delete option\n";
+                (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
                                     error_body, sizeof(error_body) - 1U);
             } else {
                 id = strtoul(path + 11, &end, 10);
@@ -1046,6 +1434,7 @@ static void handle_client(int fd) {
                     for (i = 0; i < server_queue.count; ++i) {
                         rd_queue_item *item = &server_queue.items[i];
                         if (item->id != id) continue;
+                        item->remove_downloads_on_cancel = delete_files;
                         if (active_download_id == id) {
                             remove_result = rd_queue_update(&server_queue, id, RD_JOB_CANCELLED,
                                 item->downloaded_bytes, item->expected_bytes, "Stopping download");
@@ -1056,7 +1445,7 @@ static void handle_client(int fd) {
                                 item->downloaded_bytes, item->expected_bytes, "Stopping extraction");
                             pthread_cond_broadcast(&worker_condition);
                         } else {
-                            remove_result = finish_removal(item);
+                            remove_result = finish_removal(item, delete_files);
                         }
                         break;
                     }
@@ -1094,6 +1483,17 @@ static void handle_client(int fd) {
     }
 }
 
+static void *client_thread(void *argument) {
+    int fd = *(int *)argument;
+    free(argument);
+    handle_client(fd);
+    close(fd);
+    pthread_mutex_lock(&client_mutex);
+    --active_clients;
+    pthread_mutex_unlock(&client_mutex);
+    return NULL;
+}
+
 static int prepare_download_directories(void) {
     struct stat st;
 #ifdef RD_HOST_BUILD
@@ -1123,8 +1523,11 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
     if (queue_ready) {
         for (size_t i = server_queue.count; i > 0; --i) {
             rd_queue_item *item = &server_queue.items[i - 1];
-            if (item->state == RD_JOB_CANCELLED && finish_removal(item))
-                snprintf(item->error, sizeof(item->error), "Cleanup failed. Confirm removal to retry.");
+            if (item->state == RD_JOB_CANCELLED &&
+                finish_removal(item, item->remove_downloads_on_cancel))
+                (void)rd_queue_update(&server_queue, item->id, RD_JOB_FAILED,
+                    item->downloaded_bytes, item->expected_bytes,
+                    "Cleanup failed. Remove again to retry cleanup.");
         }
     }
 
@@ -1185,7 +1588,36 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
             close(server_fd);
             return -1;
         }
-        handle_client(client_fd);
-        close(client_fd);
+        pthread_mutex_lock(&client_mutex);
+        if (active_clients >= RD_HTTP_MAX_CLIENTS) {
+            pthread_mutex_unlock(&client_mutex);
+            close(client_fd);
+            continue;
+        }
+        ++active_clients;
+        pthread_mutex_unlock(&client_mutex);
+        {
+            pthread_t thread;
+            pthread_attr_t attributes;
+            int *client_argument = (int *)malloc(sizeof(*client_argument));
+            int attributes_ready = pthread_attr_init(&attributes) == 0;
+            int stack_ready = attributes_ready &&
+                pthread_attr_setstacksize(&attributes, RD_HTTP_CLIENT_STACK) == 0;
+            int create_result = -1;
+            if (client_argument) *client_argument = client_fd;
+            if (stack_ready && client_argument)
+                create_result = pthread_create(&thread, &attributes, client_thread,
+                                               client_argument);
+            if (attributes_ready) (void)pthread_attr_destroy(&attributes);
+            if (create_result == 0) {
+                (void)pthread_detach(thread);
+            } else {
+                free(client_argument);
+                pthread_mutex_lock(&client_mutex);
+                --active_clients;
+                pthread_mutex_unlock(&client_mutex);
+                close(client_fd);
+            }
+        }
     }
 }

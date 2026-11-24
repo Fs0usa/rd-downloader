@@ -13,7 +13,7 @@ Native, single-user PS5 payload for queued direct-link downloads, optional Real-
 
 The workflow above describes the goal, not the current feature set.
 
-## Current implementation status (2026-11-23)
+## Current implementation status (2026-11-24) — Beta 1.1.1
 
 **Working PS5 HTTPS download checkpoint (v0.3.0).** The user confirmed that the HTTPS sample download completed on their PS5 with this build. The earlier HTTP service and persisted queue were also confirmed on-console. Current code includes:
 
@@ -28,19 +28,19 @@ The workflow above describes the goal, not the current feature set.
 - certificate validation using an embedded Debian Mozilla-derived CA bundle; HTTP-to-HTTPS redirects are followed and HTTPS-to-HTTP downgrade redirects are refused;
 - UI progress, status and error reporting, with queue mutation protected from cross-origin browser requests by a required custom header.
 
-The working tree adds a visible optional-password field, remembers it in browser `localStorage` under `rd.archivePassword`, and sends it to `POST /api/add` with the URL batch. The server keeps it only in process memory and omits it from API responses and queue persistence. It also starts downloads immediately after confirmation, requires a second confirmation to stop/remove, cleans owned partial files, uses URL-derived output names without the old `rd-{id}-` prefix, and displays speed/average/ETA. These changes pass host tests and cross-compile, but are not yet validated on the console. Additional files run sequentially. Pause is cooperative at progress callback boundaries; retry starts at byte zero; payload restart does not resume a transfer. Removing a completed queue entry leaves its final file.
+The visible optional password field is remembered in browser `localStorage` under `rd.archivePassword` and sent to `POST /api/add`; the server keeps it only in process memory. Downloads start after confirmation, pause/resume and stop are available, and output names come from the URL path. A user can choose whether to extract compressed files found inside an archive. Those nested archives are moved to `/data/homebrew/downloads`; extracted game files and `.pkg` copies remain under `/data/homebrew`. Queue removal offers an explicit cleanup choice for the downloaded archive and its nested compressed files. Extraction outputs already published under `/data/homebrew` are never deleted by this cleanup action. Transient connection errors and HTTP 408/425/429/5xx responses are retried up to five times with exponential delays of 5, 10, 20, 40 and 80 seconds. Downloads and retries run sequentially. Payload restart does not resume a partial transfer.
 
 The dashboard source is [`web/index.html`](web/index.html); `scripts/embed_web.py` embeds it for the native build. Its narrow mobile layout follows the supplied interface guide. Queue rows support pause/resume, retry and confirmed remove/stop; “Clear finished” removes only completed queue records and preserves their files. `GET /api/queue` reports the actual destination and extraction availability. The extraction checkbox records the requested option, while completed archive jobs explicitly state that extraction is unavailable until the WFM helper is integrated.
 
-Still missing: WFM extraction IPC (the toggle saves the choice and archive jobs report `ready_to_extract`; nothing is extracted), range/parallel downloads, retry backoff, Real-Debrid, destination selection, USB discovery and storage wait/recovery. The password reaches the backend in process memory but is not currently consumed by an extractor. Output names use a sanitized URL basename; HTTP `Content-Disposition` is not read.
+Still missing: range/parallel downloads, Real-Debrid API integration, destination selection, USB discovery and storage wait/recovery. Multipart nested-archive processing and the new retry/cleanup paths need on-console validation. HTTP `Content-Disposition` is not read.
 
 ## Queue API
 
 - `GET /api/queue` returns filenames, states, byte counts, speed/ETA and safe errors. It omits URLs and passwords.
-- `POST /api/add` accepts URL-encoded `urls`, `extract`, and `password` fields and starts the worker immediately. The older `POST /api/queue` newline-body interface remains supported.
+- `POST /api/add` accepts URL-encoded `urls`, `extract`, `extractNested`, and `password` fields and starts the worker immediately. The older `POST /api/queue` newline-body interface remains supported.
 - `POST /api/clear` removes completed records from the queue atomically while leaving downloaded files in place.
 - `POST /api/start` remains available to wake queued jobs. Include `X-RD-Command: 1`.
-- `DELETE /api/queue/{id}` removes an item. On an active transfer it aborts the request, deletes the owned partial file after worker cleanup, and removes the queue entry. The dashboard requires a second confirmation. Removing a completed item keeps its file.
+- `DELETE /api/queue/{id}` removes an item. `?deleteFiles=1` also deletes that item's downloaded archive and registered nested archives in Downloads; published output under `/data/homebrew` is kept. The dashboard requires confirmation and leaves the cleanup checkbox unchecked by default.
 
 The custom header makes browser cross-origin requests require a CORS preflight, which this server does not allow. This is a CSRF mitigation for the same-origin dashboard, not user authentication; use the service only on a trusted local network. The PS5 stores queue data at `/data/rd-downloader-queue.db` with mode 0600 and atomic replacement; Linux host mode uses `/tmp/rd-downloader-host-queue.db`. New files are saved as the sanitized URL basename under `/data/homebrew/downloads`, with `.part` appended while incomplete. Archive members and `.pkg` copies go to `/data/homebrew`.
 
@@ -85,6 +85,24 @@ make host-test
 ```
 
 To run the HTTP service locally on the PC, open two terminals in this directory. In the first, run `make host-run`; in the second, open `http://127.0.0.1:8090/` or `http://127.0.0.1:8090/api/health`. Stop the server with Ctrl+C. The host mode binds only to loopback.
+
+To load the ELF on a jailbroken PS5 with `elfldr` listening on port 9021, run:
+
+```sh
+make deploy PS5_HOST=192.168.1.123
+```
+
+This target serves the ELF temporarily from the build PC and asks `elfldr` to load its HTTP URI. The URI filename is `rd-downloader.elf`, which gives the process a recognizable name in Payload Manager. The PS5 and build PC must be able to reach each other on the LAN. Raw ELF transfer through `prospero-deploy` uses elfldr's generic `payload.elf` process name.
+
+## GitHub releases and Payload Manager
+
+Tag a release as `v1.1.1-beta` (or a later version) and push the tag. The GitHub Actions workflow builds the ELF with the pinned PS5 SDK, attaches the ELF and SHA-256 file to a GitHub release, and updates `payloads.json` with the release version and checksum. Add this raw catalog URL as a custom source in Payload Manager:
+
+```text
+https://raw.githubusercontent.com/OWNER/REPOSITORY/main/payloads.json
+```
+
+Replace `OWNER/REPOSITORY` with the public GitHub repository path. The release workflow needs Actions to be allowed to write repository contents so it can update the catalog. After the initial beta tag finishes, Payload Manager can install the release and detect future version/checksum changes from the catalog.
 
 ## Default destination and storage safety
 

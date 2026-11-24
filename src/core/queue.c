@@ -23,7 +23,7 @@ static int save_queue(const rd_queue *queue) {
     if (fd < 0) return -1;
     file = fdopen(fd, "w");
     if (!file) { close(fd); unlink(temporary); return -1; }
-    if (fprintf(file, "RDQ6\t%lu\n", queue->next_id) < 0) failed = 1;
+    if (fprintf(file, "RDQ7\t%lu\n", queue->next_id) < 0) failed = 1;
     for (i = 0; !failed && i < queue->count; ++i) {
         const unsigned char *url = (const unsigned char *)queue->items[i].url;
         if (fprintf(file, "%lu\t%u\t%llu\t%llu\t", queue->items[i].id,
@@ -36,12 +36,22 @@ static int save_queue(const rd_queue *queue) {
             }
         }
         if (failed || fputc('\t', file) == EOF) { failed = 1; break; }
-        if (fprintf(file, "%d\t%d\t%s\t%s\t", queue->items[i].legacy_partial, !!queue->items[i].extract_after_download,
-                    queue->items[i].filename, queue->items[i].destination) < 0) { failed = 1; break; }
+        if (fprintf(file, "%d\t%d\t%s\t%s\t%d\t%u\t%llu\t%d\t",
+                    queue->items[i].legacy_partial,
+                    !!queue->items[i].extract_after_download,
+                    queue->items[i].filename, queue->items[i].destination,
+                    !!queue->items[i].extract_nested_archives,
+                    queue->items[i].retry_attempts,
+                    queue->items[i].retry_after_epoch,
+                    !!queue->items[i].remove_downloads_on_cancel) < 0) { failed = 1; break; }
         for (j = 0; url[j]; ++j) {
             if (fprintf(file, "%02X", (unsigned int)url[j]) < 0) { failed = 1; break; }
         }
         if (!failed && fputc('\n', file) == EOF) failed = 1;
+    }
+    for (i = 0; !failed && i < queue->related_file_count; ++i) {
+        if (fprintf(file, "F\t%lu\t%s\n", queue->related_files[i].item_id,
+                    queue->related_files[i].filename) < 0) failed = 1;
     }
     fd = fileno(file);
     if (!failed && fflush(file) != 0) failed = 1;
@@ -62,12 +72,12 @@ static int load_queue(rd_queue *queue) {
     if (!fgets(line, sizeof(line), file) ||
         (strncmp(line, "RDQ2\t", 5U) != 0 && strncmp(line, "RDQ3\t", 5U) != 0 &&
          strncmp(line, "RDQ4\t", 5U) != 0 && strncmp(line, "RDQ5\t", 5U) != 0 &&
-         strncmp(line, "RDQ6\t", 5U) != 0)) {
+         strncmp(line, "RDQ6\t", 5U) != 0 && strncmp(line, "RDQ7\t", 5U) != 0)) {
         fclose(file);
         return -1;
     }
     version = line[3] - '0';
-    if (version < 2 || version > 6) { fclose(file); return -1; }
+    if (version < 2 || version > 7) { fclose(file); return -1; }
     errno = 0;
     stored_next_id = strtoul(line + 5, &header_end, 10);
     if (errno || header_end == line + 5 || stored_next_id == 0 ||
@@ -76,8 +86,36 @@ static int load_queue(rd_queue *queue) {
         return -1;
     }
     queue->next_id = stored_next_id;
-    needs_save = version < 6;
+    needs_save = version < 7;
     while (fgets(line, sizeof(line), file)) {
+        if (version >= 7 && line[0] == 'F' && line[1] == '\t') {
+            char *id_end, *name_end;
+            unsigned long id;
+            size_t name_length, index;
+            errno = 0;
+            id = strtoul(line + 2, &id_end, 10);
+            if (errno || id == 0 || id_end == line + 2 || *id_end != '\t' ||
+                queue->related_file_count >= RD_MAX_RELATED_FILES) goto bad_file;
+            name_end = strpbrk(id_end + 1, "\r\n");
+            if (!name_end) goto bad_file;
+            *name_end = '\0';
+            name_length = strlen(id_end + 1);
+            if (!name_length || name_length >= sizeof(queue->related_files[0].filename) ||
+                strchr(id_end + 1, '/') || strchr(id_end + 1, '\\') ||
+                strcmp(id_end + 1, ".") == 0 || strcmp(id_end + 1, "..") == 0) goto bad_file;
+            for (index = 0; index < queue->count; ++index)
+                if (queue->items[index].id == id) break;
+            if (index == queue->count) goto bad_file;
+            for (index = 0; index < name_length; ++index) {
+                unsigned char c = (unsigned char)id_end[1 + index];
+                if (!(isalnum(c) || c == '.' || c == '_' || c == '-')) goto bad_file;
+            }
+            queue->related_files[queue->related_file_count].item_id = id;
+            snprintf(queue->related_files[queue->related_file_count].filename,
+                     sizeof(queue->related_files[0].filename), "%s", id_end + 1);
+            ++queue->related_file_count;
+            continue;
+        }
         char *tab = strchr(line, '\t');
         char *end;
         unsigned long id;
@@ -171,6 +209,24 @@ static int load_queue(rd_queue *queue) {
             snprintf(item->destination, sizeof(item->destination), "%s", tab);
             tab = value_end + 1;
             item->extract_after_download = (int)extract;
+            if (version >= 7) {
+                char *nested_end, *attempts_end, *retry_end, *remove_end;
+                unsigned long nested, attempts, remove_downloads;
+                nested = strtoul(tab, &nested_end, 10);
+                if (nested_end == tab || *nested_end != '\t' || nested > 1U) goto bad_file;
+                attempts = strtoul(nested_end + 1, &attempts_end, 10);
+                if (attempts_end == nested_end + 1 || *attempts_end != '\t' || attempts > 5U)
+                    goto bad_file;
+                item->retry_after_epoch = strtoull(attempts_end + 1, &retry_end, 10);
+                if (retry_end == attempts_end + 1 || *retry_end != '\t') goto bad_file;
+                remove_downloads = strtoul(retry_end + 1, &remove_end, 10);
+                if (remove_end == retry_end + 1 || *remove_end != '\t' || remove_downloads > 1U)
+                    goto bad_file;
+                item->extract_nested_archives = (int)nested;
+                item->retry_attempts = (unsigned int)attempts;
+                item->remove_downloads_on_cancel = (int)remove_downloads;
+                tab = remove_end + 1;
+            }
         }
         if (interrupted || state == (unsigned int)RD_JOB_PAUSED) {
             item->state = RD_JOB_FAILED;
@@ -214,8 +270,10 @@ int rd_queue_init(rd_queue *queue, const char *state_path) {
     return load_queue(queue);
 }
 
-int rd_queue_add_batch_options(rd_queue *queue, const char (*urls)[RD_MAX_URL_LENGTH], size_t count,
-                               int extract_after_download, const char *password) {
+int rd_queue_add_batch_preferences(rd_queue *queue,
+                                   const char (*urls)[RD_MAX_URL_LENGTH], size_t count,
+                                   int extract_after_download, int extract_nested_archives,
+                                   const char *password) {
     rd_queue *candidate;
     size_t i;
     if (!queue || (!urls && count) || queue->count > RD_MAX_QUEUE_ITEMS ||
@@ -233,6 +291,7 @@ int rd_queue_add_batch_options(rd_queue *queue, const char (*urls)[RD_MAX_URL_LE
         item->id = candidate->next_id++;
         item->state = RD_JOB_QUEUED;
         item->extract_after_download = !!extract_after_download;
+        item->extract_nested_archives = !!extract_nested_archives;
         snprintf(item->destination, sizeof(item->destination), "%s", RD_DEFAULT_DOWNLOAD_DIRECTORY);
         memcpy(item->url, urls[i], url_length + 1U);
         rd_download_filename(item->url, item->filename, sizeof(item->filename));
@@ -243,6 +302,11 @@ int rd_queue_add_batch_options(rd_queue *queue, const char (*urls)[RD_MAX_URL_LE
     *queue = *candidate;
     free(candidate);
     return (int)count;
+}
+
+int rd_queue_add_batch_options(rd_queue *queue, const char (*urls)[RD_MAX_URL_LENGTH], size_t count,
+                               int extract_after_download, const char *password) {
+    return rd_queue_add_batch_preferences(queue, urls, count, extract_after_download, 0, password);
 }
 
 int rd_queue_add_batch(rd_queue *queue, const char (*urls)[RD_MAX_URL_LENGTH], size_t count) {
@@ -262,6 +326,18 @@ int rd_queue_remove(rd_queue *queue, unsigned long id) {
                     (candidate->count - i - 1U) * sizeof(candidate->items[0]));
             --candidate->count;
             memset(&candidate->items[candidate->count], 0, sizeof(candidate->items[0]));
+            {
+                size_t read_index, write_index = 0;
+                for (read_index = 0; read_index < candidate->related_file_count; ++read_index)
+                    if (candidate->related_files[read_index].item_id != id) {
+                        if (write_index != read_index)
+                            candidate->related_files[write_index] = candidate->related_files[read_index];
+                        ++write_index;
+                    }
+                memset(candidate->related_files + write_index, 0,
+                       (candidate->related_file_count - write_index) * sizeof(candidate->related_files[0]));
+                candidate->related_file_count = write_index;
+            }
             if (save_queue(candidate) != 0) { free(candidate); return -1; }
             *queue = *candidate;
             free(candidate);
@@ -296,6 +372,22 @@ int rd_queue_clear_completed(rd_queue *queue) {
     memset(candidate->items + write_index, 0,
            (candidate->count - write_index) * sizeof(candidate->items[0]));
     candidate->count = write_index;
+    {
+        size_t read_index, related_write = 0;
+        for (read_index = 0; read_index < candidate->related_file_count; ++read_index) {
+            size_t item_index;
+            for (item_index = 0; item_index < candidate->count; ++item_index)
+                if (candidate->items[item_index].id == candidate->related_files[read_index].item_id) break;
+            if (item_index < candidate->count) {
+                if (related_write != read_index)
+                    candidate->related_files[related_write] = candidate->related_files[read_index];
+                ++related_write;
+            }
+        }
+        memset(candidate->related_files + related_write, 0,
+               (candidate->related_file_count - related_write) * sizeof(candidate->related_files[0]));
+        candidate->related_file_count = related_write;
+    }
     if (save_queue(candidate) != 0) {
         free(candidate);
         return -1;
@@ -336,6 +428,87 @@ int rd_queue_update(rd_queue *queue, unsigned long id, rd_job_state state,
             free(candidate);
             return 0;
         }
+    }
+    free(candidate);
+    return -2;
+}
+
+static int safe_related_filename(const char *filename) {
+    size_t i, length;
+    if (!filename || !(length = strlen(filename)) || length >= sizeof(((rd_related_file *)0)->filename) ||
+        strcmp(filename, ".") == 0 || strcmp(filename, "..") == 0) return 0;
+    for (i = 0; i < length; ++i) {
+        unsigned char c = (unsigned char)filename[i];
+        if (!(isalnum(c) || c == '.' || c == '_' || c == '-')) return 0;
+    }
+    return 1;
+}
+
+int rd_queue_has_related_file(const rd_queue *queue, unsigned long item_id,
+                              const char *filename) {
+    size_t i;
+    if (!queue || !item_id || !filename) return 0;
+    for (i = 0; i < queue->related_file_count; ++i)
+        if (queue->related_files[i].item_id == item_id &&
+            strcmp(queue->related_files[i].filename, filename) == 0) return 1;
+    return 0;
+}
+
+int rd_queue_record_related_file(rd_queue *queue, unsigned long item_id,
+                                 const char *filename) {
+    rd_queue *candidate;
+    size_t i;
+    int found = 0;
+    if (!queue || !item_id || !safe_related_filename(filename)) return -1;
+    if (rd_queue_has_related_file(queue, item_id, filename)) return 0;
+    for (i = 0; i < queue->count; ++i)
+        if (queue->items[i].id == item_id) { found = 1; break; }
+    if (!found || queue->related_file_count >= RD_MAX_RELATED_FILES) return -1;
+    candidate = (rd_queue *)malloc(sizeof(*candidate));
+    if (!candidate) return -1;
+    *candidate = *queue;
+    candidate->related_files[candidate->related_file_count].item_id = item_id;
+    snprintf(candidate->related_files[candidate->related_file_count].filename,
+             sizeof(candidate->related_files[0].filename), "%s", filename);
+    ++candidate->related_file_count;
+    if (save_queue(candidate) != 0) { free(candidate); return -1; }
+    *queue = *candidate;
+    free(candidate);
+    return 0;
+}
+
+int rd_queue_set_retry(rd_queue *queue, unsigned long item_id,
+                       unsigned int attempts, unsigned long long retry_after_epoch,
+                       rd_job_state state, const char *error) {
+    rd_queue *candidate;
+    size_t i;
+    if (!queue || !item_id || attempts > 5U || (unsigned int)state >= 14U) return -1;
+    candidate = (rd_queue *)malloc(sizeof(*candidate));
+    if (!candidate) return -1;
+    *candidate = *queue;
+    for (i = 0; i < candidate->count; ++i) if (candidate->items[i].id == item_id) {
+        rd_queue_item *item = &candidate->items[i];
+        item->retry_attempts = attempts;
+        item->retry_after_epoch = retry_after_epoch;
+        item->state = state;
+        if (state == RD_JOB_WAITING_FOR_NETWORK) {
+            item->downloaded_bytes = 0;
+            item->expected_bytes = 0;
+            item->speed_bps = item->average_bps = item->eta_seconds = 0;
+        }
+        if (error) {
+            size_t j;
+            for (j = 0; j + 1U < sizeof(item->error) && error[j]; ++j) {
+                unsigned char c = (unsigned char)error[j];
+                item->error[j] = c < 0x20U || c >= 0x7fU || c == '"' || c == '\\' ? '_' : (char)c;
+            }
+            item->error[j] = '\0';
+            memset(item->error + j + 1U, 0, sizeof(item->error) - j - 1U);
+        }
+        if (save_queue(candidate) != 0) { free(candidate); return -1; }
+        *queue = *candidate;
+        free(candidate);
+        return 0;
     }
     free(candidate);
     return -2;

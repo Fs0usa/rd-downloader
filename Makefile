@@ -9,6 +9,8 @@ endif
 endif
 HOST_CC ?= cc
 CA_BUNDLE ?= /etc/ssl/certs/ca-certificates.crt
+RD_VERSION ?= $(shell cat VERSION 2>/dev/null || echo 1.1.1-beta)
+VERSION_FLAGS := -DRD_DOWNLOADER_VERSION='"$(RD_VERSION)"'
 
 HOST_GOALS := host-test host-server host-run
 ifeq ($(filter $(HOST_GOALS),$(MAKECMDGOALS)),)
@@ -22,7 +24,7 @@ endif
 
 ELF := rd-downloader.elf
 WEB_EMBED := src/core/index_html.inc
-CFLAGS := -Wall -Wextra -Werror -O2 -pthread -Iinclude
+CFLAGS := -Wall -Wextra -Werror -O2 -pthread -Iinclude $(VERSION_FLAGS)
 SOURCES := src/main.c src/core/range_plan.c src/core/space_plan.c src/core/archive.c src/core/queue.c src/core/output.c
 SOURCES += src/core/http_server.c
 SOURCES += src/core/http_client.c src/core/ps5_http_client.c
@@ -57,14 +59,14 @@ host-test:
 	rm -f build-range-tests build-space-tests build-queue-tests build-http-tests
 
 host-server: src/main.c src/core/http_server.c src/core/http_client.c src/core/queue.c src/core/output.c src/core/archive.c src/core/wfm_client.c $(WEB_EMBED) include/rd/http_server.h include/rd/http_client.h include/rd/queue.h include/rd/output.h include/rd/archive.h include/rd/wfm_client.h
-	$(HOST_CC) -std=c11 -D_DEFAULT_SOURCE -DRD_HOST_BUILD -Wall -Wextra -Werror -O2 -pthread -Iinclude \
+	$(HOST_CC) -std=c11 -D_DEFAULT_SOURCE -DRD_HOST_BUILD -Wall -Wextra -Werror -O2 -pthread -Iinclude $(VERSION_FLAGS) \
 		src/main.c src/core/http_server.c src/core/http_client.c src/core/ps5_http_client.c src/core/wfm_client.c src/core/queue.c src/core/output.c src/core/archive.c -o rd-downloader-host
 
 host-run: host-server
 	./rd-downloader-host
 
 deploy: $(ELF)
-	$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $(ELF)
+	python3 scripts/deploy-named.py --host $(PS5_HOST) --port $(PS5_PORT) --deploy "$(PS5_DEPLOY)" $(ELF)
 
 clean:
 	rm -f $(ELF) rd-downloader-host build-range-tests build-space-tests build-queue-tests
