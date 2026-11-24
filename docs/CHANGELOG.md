@@ -1,5 +1,9 @@
 # Changelog
 
+## Beta — 1.1.2-beta.7
+
+- Keep `.elf` in the process title so Payload Manager recognizes RD Downloader as a payload and displays its payload icon.
+
 ## Beta — 1.1.2-beta.6
 
 - Set the running process title to `rd-downloader` at startup so Payload Manager's Active Processes view shows the project name regardless of launch method.

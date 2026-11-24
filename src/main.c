@@ -29,7 +29,7 @@ main(void)
     rd_notification_request request;
     int process_name_result;
 
-    process_name_result = sceKernelSetProcessName("rd-downloader");
+    process_name_result = sceKernelSetProcessName("rd-downloader.elf");
     if (process_name_result != 0)
         rd_log_write("ERROR", "sceKernelSetProcessName failed result=%d", process_name_result);
 

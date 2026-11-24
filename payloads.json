@@ -7,10 +7,10 @@
       "filename": "rd-downloader.elf",
       "url": "https://raw.githubusercontent.com/Fs0usa/rd-downloader/main/distribution/rd-downloader.elf",
       "description": "PS5 HTTP/HTTPS download queue with optional archive extraction.",
-      "version": "v1.1.2-beta.6",
+      "version": "v1.1.2-beta.7",
       "last_update": "2026-11-24",
       "category": "Downloads",
-      "checksum": "a0b5c6dcd6c9603f0f0e62714326252591d8c7627d97592f02382702a1efc5e4"
+      "checksum": "ba73e99499d9be9bc3e0b92d8b4dc27ec32275344453cab3bb439f93ead41a5d"
     }
   ]
 }
