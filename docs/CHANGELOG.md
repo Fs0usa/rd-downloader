@@ -1,5 +1,10 @@
 # Changelog
 
+## Beta — 1.1.2-beta.10
+
+- Avoid showing the opaque-link warning for signed `/download/` URLs (`sig`, `signature`, `token` or `X-Amz-Signature` query parameter). These URLs may provide their filename through the response headers.
+
+
 ## Beta — 1.1.2-beta.9
 
 - Allow a filename to be edited for every queued link; persist the chosen name and use it for partial/final files and cleanup.
