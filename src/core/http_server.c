@@ -13,6 +13,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
@@ -42,6 +43,8 @@
 #define RD_EXTRACTION_DIRECTORY RD_DEFAULT_EXTRACTION_DIRECTORY
 #endif
 
+#define RD_LOG_FILENAME "rd-downloader.log"
+
 static rd_queue server_queue;
 static int queue_ready;
 static int download_directory_ready;
@@ -53,6 +56,46 @@ static unsigned long active_download_id;
 static unsigned long active_extraction_id;
 static pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
 static unsigned int active_clients;
+static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void write_log(const char *format, ...) {
+    char path[640], message[1536], line[1792];
+    struct timespec now;
+    struct tm calendar;
+    va_list arguments;
+    size_t used, i;
+    int fd, count;
+    if (snprintf(path, sizeof(path), "%s/%s", RD_DOWNLOAD_DIRECTORY,
+                 RD_LOG_FILENAME) >= (int)sizeof(path)) return;
+    va_start(arguments, format);
+    count = vsnprintf(message, sizeof(message), format, arguments);
+    va_end(arguments);
+    if (count < 0) return;
+    message[sizeof(message) - 1U] = '\0';
+    for (i = 0; message[i]; ++i)
+        if (message[i] == '\r' || message[i] == '\n' ||
+            (unsigned char)message[i] < 0x20U) message[i] = ' ';
+    (void)clock_gettime(CLOCK_REALTIME, &now);
+    (void)localtime_r(&now.tv_sec, &calendar);
+    count = snprintf(line, sizeof(line), "%04d-%02d-%02dT%02d:%02d:%02d.%03ld %s\n",
+        calendar.tm_year + 1900, calendar.tm_mon + 1, calendar.tm_mday,
+        calendar.tm_hour, calendar.tm_min, calendar.tm_sec, now.tv_nsec / 1000000L,
+        message);
+    if (count < 0 || (size_t)count >= sizeof(line)) return;
+    pthread_mutex_lock(&log_mutex);
+    fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        used = 0;
+        while (used < (size_t)count) {
+            ssize_t written = write(fd, line + used, (size_t)count - used);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) break;
+            used += (size_t)written;
+        }
+        close(fd);
+    }
+    pthread_mutex_unlock(&log_mutex);
+}
 
 static int same_archive_set(const rd_queue_item *candidate, const rd_queue_item *other,
                             const rd_archive_name *candidate_name);
@@ -895,6 +938,7 @@ static void *download_worker(void *unused) {
     for (;;) {
         char url[RD_MAX_URL_LENGTH];
         char destination[512];
+        char filename[512];
         char archive_path[1024];
         char extraction_destination[512];
         char password[RD_MAX_PASSWORD_LENGTH];
@@ -935,6 +979,7 @@ static void *download_worker(void *unused) {
                     active_download_id = id;
                     memcpy(url, item->url, sizeof(url));
                     snprintf(destination, sizeof(destination), "%s", download_directory(item));
+                    snprintf(filename, sizeof(filename), "%s", item->filename);
                     break;
                 }
             }
@@ -1088,8 +1133,12 @@ static void *download_worker(void *unused) {
         progress.started_ms = monotonic_ms();
         progress.previous_ms = 0;
         progress.previous_bytes = 0;
+        write_log("download started id=%lu file=%s destination=%s", id, filename, destination);
         result = rd_http_download(url, destination, id, record_progress,
                                   &progress, error, sizeof(error));
+        write_log("download %s id=%lu file=%s destination=%s%s%s", result == 0 ? "completed" : "failed",
+                  id, filename, destination, result == 0 ? "" : " error=",
+                  result == 0 ? "" : error);
 
         pthread_mutex_lock(&queue_mutex);
         active_download_id = 0;
@@ -1516,9 +1565,21 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
     queue_ready = rd_queue_init(&server_queue, "/data/rd-downloader-queue.db") == 0;
 #endif
     download_directory_ready = queue_ready && prepare_download_directories() == 0;
-    if (queue_ready && !download_directory_ready)
+    if (download_directory_ready) {
+        struct stat directory_stat;
+        if (stat(RD_DOWNLOAD_DIRECTORY, &directory_stat) == 0)
+            write_log("service started version=%s download_directory=%s mode=%04o uid=%u gid=%u",
+                      RD_DOWNLOADER_VERSION, RD_DOWNLOAD_DIRECTORY,
+                      (unsigned int)(directory_stat.st_mode & 07777),
+                      (unsigned int)directory_stat.st_uid, (unsigned int)directory_stat.st_gid);
+        else write_log("service started version=%s download_directory=%s stat_errno=%d",
+                       RD_DOWNLOADER_VERSION, RD_DOWNLOAD_DIRECTORY, errno);
+    } else if (queue_ready) {
+        write_log("downloads directory setup failed path=%s errno=%d",
+                  RD_DOWNLOAD_DIRECTORY, errno);
         fprintf(stderr, "RD Downloader: cannot prepare downloads directory %s: %s\n",
                 RD_DOWNLOAD_DIRECTORY, strerror(errno));
+    }
 
     if (queue_ready) {
         for (size_t i = server_queue.count; i > 0; --i) {

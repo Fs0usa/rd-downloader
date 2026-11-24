@@ -1,5 +1,11 @@
 # Changelog
 
+## Beta — 1.1.2-beta.3
+
+- Write timestamped service and download diagnostics to `/data/homebrew/downloads/rd-downloader.log`.
+- Record download failures with item ID, filename, destination, and filesystem error details; URLs and archive passwords are never logged.
+- Include destination mode and owner IDs in write-check failures to diagnose the reported PS5 permission issue.
+
 ## Beta — 1.1.2-beta.2
 
 - Create `/data/homebrew/downloads` with mode 755; report queue readiness separately from download-folder readiness.

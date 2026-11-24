@@ -333,8 +333,21 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
         set_error(error, error_capacity, "only valid HTTP and HTTPS URLs are supported");
         return -1;
     }
-    if (stat(directory, &st) || !S_ISDIR(st.st_mode) || access(directory, W_OK)) {
-        set_error(error, error_capacity, "destination is missing or not writable");
+    if (stat(directory, &st) != 0) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "destination stat failed (errno=%d)", errno);
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        set_error(error, error_capacity, "destination is not a directory");
+        return -1;
+    }
+    if (access(directory, W_OK) != 0) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity,
+                     "destination access check failed (errno=%d mode=%04o uid=%u gid=%u)",
+                     errno, (unsigned int)(st.st_mode & 07777),
+                     (unsigned int)st.st_uid, (unsigned int)st.st_gid);
         return -1;
     }
     if (rd_output_paths(&output, directory, input_url, item_id) != 0) {
