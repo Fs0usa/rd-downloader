@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import shutil
+from datetime import date
 from pathlib import Path
 
 
@@ -45,10 +46,12 @@ catalog = {
     "payloads": [
         {
             "name": "RD Downloader",
+            "id": "rd-downloader",
             "filename": "rd-downloader.elf",
             "url": f"https://raw.githubusercontent.com/{args.repository}/main/distribution/rd-downloader.elf",
             "description": "PS5 HTTP/HTTPS download queue with optional archive extraction.",
             "version": args.version,
+            "last_update": date.today().isoformat(),
             "category": "Downloads",
             "checksum": digest.lower(),
         }

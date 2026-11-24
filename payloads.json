@@ -3,12 +3,14 @@
   "payloads": [
     {
       "name": "RD Downloader",
+      "id": "rd-downloader",
       "filename": "rd-downloader.elf",
       "url": "https://raw.githubusercontent.com/Fs0usa/rd-downloader/main/distribution/rd-downloader.elf",
       "description": "PS5 HTTP/HTTPS download queue with optional archive extraction.",
-      "version": "v1.1.2-beta.3",
+      "version": "v1.1.2-beta.4",
+      "last_update": "2026-11-24",
       "category": "Downloads",
-      "checksum": "a6f3c5d7fa14961e3b4a9ac417798cbfa540ada6a077da585cb8b0545d155520"
+      "checksum": "f2ed6c644b41ef3a0b9b6e85c742ac23385e391aefd57d510169a5aa6664cc7f"
     }
   ]
 }

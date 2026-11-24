@@ -5,6 +5,7 @@
 #include "rd/output.h"
 #include "rd/wfm_client.h"
 #include "rd/version.h"
+#include "rd/log.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -13,7 +14,6 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
-#include <stdarg.h>
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
@@ -43,8 +43,6 @@
 #define RD_EXTRACTION_DIRECTORY RD_DEFAULT_EXTRACTION_DIRECTORY
 #endif
 
-#define RD_LOG_FILENAME "rd-downloader.log"
-
 static rd_queue server_queue;
 static int queue_ready;
 static int download_directory_ready;
@@ -56,47 +54,6 @@ static unsigned long active_download_id;
 static unsigned long active_extraction_id;
 static pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
 static unsigned int active_clients;
-static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-static void write_log(const char *format, ...) {
-    char path[640], message[1536], line[1792];
-    struct timespec now;
-    struct tm calendar;
-    va_list arguments;
-    size_t used, i;
-    int fd, count;
-    if (snprintf(path, sizeof(path), "%s/%s", RD_DOWNLOAD_DIRECTORY,
-                 RD_LOG_FILENAME) >= (int)sizeof(path)) return;
-    va_start(arguments, format);
-    count = vsnprintf(message, sizeof(message), format, arguments);
-    va_end(arguments);
-    if (count < 0) return;
-    message[sizeof(message) - 1U] = '\0';
-    for (i = 0; message[i]; ++i)
-        if (message[i] == '\r' || message[i] == '\n' ||
-            (unsigned char)message[i] < 0x20U) message[i] = ' ';
-    (void)clock_gettime(CLOCK_REALTIME, &now);
-    (void)localtime_r(&now.tv_sec, &calendar);
-    count = snprintf(line, sizeof(line), "%04d-%02d-%02dT%02d:%02d:%02d.%03ld %s\n",
-        calendar.tm_year + 1900, calendar.tm_mon + 1, calendar.tm_mday,
-        calendar.tm_hour, calendar.tm_min, calendar.tm_sec, now.tv_nsec / 1000000L,
-        message);
-    if (count < 0 || (size_t)count >= sizeof(line)) return;
-    pthread_mutex_lock(&log_mutex);
-    fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd >= 0) {
-        used = 0;
-        while (used < (size_t)count) {
-            ssize_t written = write(fd, line + used, (size_t)count - used);
-            if (written < 0 && errno == EINTR) continue;
-            if (written <= 0) break;
-            used += (size_t)written;
-        }
-        close(fd);
-    }
-    pthread_mutex_unlock(&log_mutex);
-}
-
 static int same_archive_set(const rd_queue_item *candidate, const rd_queue_item *other,
                             const rd_archive_name *candidate_name);
 
@@ -167,7 +124,11 @@ static int send_response(int fd, int status, const char *reason,
                          const char *content_type, const char *body,
                          size_t body_length) {
     char headers[512];
-    int header_length = snprintf(headers, sizeof(headers),
+    int header_length;
+    if (status >= 400)
+        rd_log_write("ERROR", "HTTP response status=%d reason=%s", status,
+                     reason ? reason : "unknown");
+    header_length = snprintf(headers, sizeof(headers),
         "HTTP/1.1 %d %s\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %lu\r\n"
@@ -178,9 +139,16 @@ static int send_response(int fd, int status, const char *reason,
         "Referrer-Policy: no-referrer\r\n"
         "Connection: close\r\n\r\n",
         status, reason, content_type, (unsigned long)body_length);
-    if (header_length < 0 || (size_t)header_length >= sizeof(headers)) return -1;
-    if (send_all(fd, headers, (size_t)header_length) != 0) return -1;
-    return send_all(fd, body, body_length);
+    if (header_length < 0 || (size_t)header_length >= sizeof(headers)) {
+        rd_log_write("ERROR", "HTTP response header formatting failed status=%d", status);
+        return -1;
+    }
+    if (send_all(fd, headers, (size_t)header_length) != 0 ||
+        send_all(fd, body, body_length) != 0) {
+        rd_log_write("ERROR", "HTTP response write failed status=%d errno=%d", status, errno);
+        return -1;
+    }
+    return 0;
 }
 
 static const char *find_header(const char *request, const char *name) {
@@ -1041,6 +1009,9 @@ static void *download_worker(void *unused) {
                                     record_extraction_progress, extraction_cancel_requested,
                                     &extraction_progress,
                                     error, sizeof(error));
+            if (result != 0)
+                rd_log_write("ERROR", "archive extraction failed id=%lu archive=%s error=%s",
+                             id, archive_path, error[0] ? error : "unspecified helper error");
             if (result == 0) {
                 promote_extracted_packages(&extraction_progress, extraction_destination,
                                            package_warning, sizeof(package_warning));
@@ -1072,8 +1043,8 @@ static void *download_worker(void *unused) {
                         nested_failures++;
                 } else {
                     nested_failures++;
-                    fprintf(stderr, "RD Downloader: nested archive extraction failed for queue item %lu: %s\n",
-                            id, child_error);
+                    rd_log_write("ERROR", "nested archive extraction failed id=%lu file=%s error=%s",
+                                 id, job.path, child_error);
                     if (move_extracted_archives(&child_progress, extraction_destination,
                             NULL, NULL, job.depth, nested_warning,
                             sizeof(nested_warning)) != 0)
@@ -1133,12 +1104,14 @@ static void *download_worker(void *unused) {
         progress.started_ms = monotonic_ms();
         progress.previous_ms = 0;
         progress.previous_bytes = 0;
-        write_log("download started id=%lu file=%s destination=%s", id, filename, destination);
+        rd_log_write("INFO", "download started id=%lu file=%s destination=%s",
+                     id, filename, destination);
         result = rd_http_download(url, destination, id, record_progress,
                                   &progress, error, sizeof(error));
-        write_log("download %s id=%lu file=%s destination=%s%s%s", result == 0 ? "completed" : "failed",
-                  id, filename, destination, result == 0 ? "" : " error=",
-                  result == 0 ? "" : error);
+        rd_log_write(result == 0 ? "INFO" : "ERROR",
+                     "download %s id=%lu file=%s destination=%s%s%s",
+                     result == 0 ? "completed" : "failed", id, filename, destination,
+                     result == 0 ? "" : " error=", result == 0 ? "" : error);
 
         pthread_mutex_lock(&queue_mutex);
         active_download_id = 0;
@@ -1206,9 +1179,14 @@ static void handle_client(int fd) {
                                          RD_HTTP_MAX_REQUEST - used, deadline_ms);
         if (n < 0) {
             if (errno == EINTR) continue;
+            if (used) rd_log_write("ERROR", "client request read failed errno=%d", errno);
             return;
         }
-        if (n == 0) return;
+        if (n == 0) {
+            if (used) rd_log_write("ERROR", "client disconnected during request headers bytes=%lu",
+                                   (unsigned long)used);
+            return;
+        }
         used += (size_t)n;
         request[used] = '\0';
         end_headers = strstr(request, "\r\n\r\n");
@@ -1303,7 +1281,11 @@ static void handle_client(int fd) {
             while (received < body_length) {
                 ssize_t got = recv_before_deadline(fd, request + used,
                                                    body_length - received, deadline_ms);
-                if (got <= 0) return;
+                if (got <= 0) {
+                    rd_log_write("ERROR", "client disconnected during request body bytes=%lu of %lu",
+                                 (unsigned long)received, (unsigned long)body_length);
+                    return;
+                }
                 used += (size_t)got;
                 received += (size_t)got;
             }
@@ -1568,14 +1550,14 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
     if (download_directory_ready) {
         struct stat directory_stat;
         if (stat(RD_DOWNLOAD_DIRECTORY, &directory_stat) == 0)
-            write_log("service started version=%s download_directory=%s mode=%04o uid=%u gid=%u",
+            rd_log_write("INFO", "service started version=%s download_directory=%s mode=%04o uid=%u gid=%u",
                       RD_DOWNLOADER_VERSION, RD_DOWNLOAD_DIRECTORY,
                       (unsigned int)(directory_stat.st_mode & 07777),
                       (unsigned int)directory_stat.st_uid, (unsigned int)directory_stat.st_gid);
-        else write_log("service started version=%s download_directory=%s stat_errno=%d",
+        else rd_log_write("ERROR", "service started version=%s download_directory=%s stat_errno=%d",
                        RD_DOWNLOADER_VERSION, RD_DOWNLOAD_DIRECTORY, errno);
     } else if (queue_ready) {
-        write_log("downloads directory setup failed path=%s errno=%d",
+        rd_log_write("ERROR", "downloads directory setup failed path=%s errno=%d",
                   RD_DOWNLOAD_DIRECTORY, errno);
         fprintf(stderr, "RD Downloader: cannot prepare downloads directory %s: %s\n",
                 RD_DOWNLOAD_DIRECTORY, strerror(errno));
@@ -1585,10 +1567,12 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
         for (size_t i = server_queue.count; i > 0; --i) {
             rd_queue_item *item = &server_queue.items[i - 1];
             if (item->state == RD_JOB_CANCELLED &&
-                finish_removal(item, item->remove_downloads_on_cancel))
+                finish_removal(item, item->remove_downloads_on_cancel)) {
+                rd_log_write("ERROR", "startup cleanup failed id=%lu errno=%d", item->id, errno);
                 (void)rd_queue_update(&server_queue, item->id, RD_JOB_FAILED,
                     item->downloaded_bytes, item->expected_bytes,
                     "Cleanup failed. Remove again to retry cleanup.");
+            }
         }
     }
 
@@ -1602,18 +1586,21 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
                                           download_worker, NULL) == 0) {
             (void)pthread_detach(worker);
             worker_started = 1;
-            fprintf(stderr, "RD Downloader: worker started with %u-byte stack\n",
-                    (unsigned int)RD_DOWNLOAD_WORKER_STACK);
+            rd_log_write("INFO", "worker started stack_bytes=%u",
+                         (unsigned int)RD_DOWNLOAD_WORKER_STACK);
         } else {
-            fprintf(stderr, "RD Downloader: worker startup failed (thread or stack setup)\n");
+            rd_log_write("ERROR", "worker startup failed thread_or_stack_setup");
         }
         if (attributes_ready) (void)pthread_attr_destroy(&worker_attributes);
     }
 
-    if (!bind_address || port == 0) return -1;
+    if (!bind_address || port == 0) {
+        rd_log_write("ERROR", "invalid server bind configuration port=%u", (unsigned int)port);
+        return -1;
+    }
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
-        perror("socket");
+        rd_log_write("ERROR", "cannot create listener socket errno=%d", errno);
         return -1;
     }
     (void)setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
@@ -1624,28 +1611,29 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
     if (inet_pton(AF_INET, bind_address, &address.sin_addr) != 1) {
-        fprintf(stderr, "invalid bind address: %s\n", bind_address);
+        rd_log_write("ERROR", "invalid bind address: %s", bind_address);
         close(server_fd);
         return -1;
     }
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
-        perror("bind");
+        rd_log_write("ERROR", "bind failed address=%s port=%u errno=%d",
+                     bind_address, (unsigned int)port, errno);
         close(server_fd);
         return -1;
     }
     if (listen(server_fd, RD_HTTP_MAX_CLIENTS) != 0) {
-        perror("listen");
+        rd_log_write("ERROR", "listen failed errno=%d", errno);
         close(server_fd);
         return -1;
     }
 
-    fprintf(stderr, "RD Downloader health service listening on %s:%u\n",
-            bind_address, (unsigned int)port);
+    rd_log_write("INFO", "HTTP service listening address=%s port=%u",
+                 bind_address, (unsigned int)port);
     for (;;) {
         int client_fd = accept(server_fd, NULL, NULL);
         if (client_fd < 0) {
             if (errno == EINTR) continue;
-            perror("accept");
+            rd_log_write("ERROR", "accept failed errno=%d", errno);
             close(server_fd);
             return -1;
         }

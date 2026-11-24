@@ -1,5 +1,13 @@
 # Changelog
 
+## Beta — 1.1.2-beta.4
+
+- Log backend errors and key lifecycle events to `/data/homebrew/downloads/rd-downloader.log`; URLs and archive passwords are excluded.
+- Record queue persistence, API error responses, request read/write failures, download errors, extraction/helper errors and startup failures.
+- Include filesystem mode, owner IDs and errno details for download destination failures.
+- Make `make deploy` return after elfldr fetches the ELF and disable the stdio pipe that kept `socat` waiting.
+- Publish a stable Payload Manager catalog ID and explicit version/update date for the version badge and update checks.
+
 ## Beta — 1.1.2-beta.3
 
 - Write timestamped service and download diagnostics to `/data/homebrew/downloads/rd-downloader.log`.

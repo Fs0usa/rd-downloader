@@ -7,6 +7,7 @@ import argparse
 import http.server
 import os
 import pathlib
+import signal
 import socket
 import subprocess
 import sys
@@ -66,21 +67,43 @@ def main() -> int:
     server.timeout = 1
     serving = threading.Thread(target=server.serve_forever, daemon=True)
     serving.start()
-    uri = f"http://{local}:{server.server_address[1]}/{urllib.parse.quote(filename)}"
+    # Keep elfldr's stdio pipe detached from the long-running payload. Without
+    # pipe=0, prospero-deploy/socat can wait for the payload process to exit.
+    uri = f"http://{local}:{server.server_address[1]}/{urllib.parse.quote(filename)}?pipe=0"
     print(f"Asking elfldr at {remote}:{args.port} to load {filename} by URI")
     print(f"Temporary ELF URL: {uri}")
+    process: subprocess.Popen[bytes] | None = None
     try:
-        result = subprocess.run(
-            [args.deploy, "-h", args.host, "-p", str(args.port), uri], check=False
+        process = subprocess.Popen(
+            [args.deploy, "-h", args.host, "-p", str(args.port), uri],
+            start_new_session=True,
         )
-        if result.returncode:
-            return result.returncode
-        if not requested.wait(timeout=90):
+        deadline = 90
+        while deadline > 0 and not requested.wait(timeout=0.1):
+            deadline -= 0.1
+            if process.poll() is not None:
+                print(f"prospero-deploy exited with status {process.returncode} before elfldr fetched the ELF",
+                      file=sys.stderr)
+                return process.returncode or 1
+        if not requested.is_set():
             print("elfldr did not fetch the ELF within 90 seconds", file=sys.stderr)
             return 1
         print(f"elfldr fetched {filename}; process name should now be {filename}")
         return 0
     finally:
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
         server.shutdown()
         server.server_close()
         serving.join(timeout=2)

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rd/queue.h"
 #include "rd/output.h"
+#include "rd/log.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -18,9 +19,16 @@ static int save_queue(const rd_queue *queue) {
     size_t i, j;
     int fd, failed = 0;
     if (snprintf(temporary, sizeof(temporary), "%s.tmpXXXXXX", queue->state_path) >=
-        (int)sizeof(temporary)) return -1;
+        (int)sizeof(temporary)) {
+        rd_log_write("ERROR", "queue state path is too long");
+        return -1;
+    }
     fd = mkstemp(temporary);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        rd_log_write("ERROR", "cannot create queue state temporary file path=%s errno=%d",
+                     queue->state_path, errno);
+        return -1;
+    }
     file = fdopen(fd, "w");
     if (!file) { close(fd); unlink(temporary); return -1; }
     if (fprintf(file, "RDQ7\t%lu\n", queue->next_id) < 0) failed = 1;
@@ -58,7 +66,12 @@ static int save_queue(const rd_queue *queue) {
     if (!failed && fsync(fd) != 0) failed = 1;
     if (fclose(file) != 0) failed = 1;
     if (!failed && rename(temporary, queue->state_path) != 0) failed = 1;
-    if (failed) unlink(temporary);
+    if (failed) {
+        int saved_errno = errno;
+        unlink(temporary);
+        rd_log_write("ERROR", "cannot persist queue state path=%s errno=%d",
+                     queue->state_path, saved_errno);
+    }
     return failed ? -1 : 0;
 }
 
@@ -68,12 +81,18 @@ static int load_queue(rd_queue *queue) {
     unsigned long stored_next_id;
     int version, needs_save = 0;
     FILE *file = fopen(queue->state_path, "r");
-    if (!file) return errno == ENOENT ? 0 : -1;
+    if (!file) {
+        if (errno != ENOENT)
+            rd_log_write("ERROR", "cannot read queue state path=%s errno=%d",
+                         queue->state_path, errno);
+        return errno == ENOENT ? 0 : -1;
+    }
     if (!fgets(line, sizeof(line), file) ||
         (strncmp(line, "RDQ2\t", 5U) != 0 && strncmp(line, "RDQ3\t", 5U) != 0 &&
          strncmp(line, "RDQ4\t", 5U) != 0 && strncmp(line, "RDQ5\t", 5U) != 0 &&
          strncmp(line, "RDQ6\t", 5U) != 0 && strncmp(line, "RDQ7\t", 5U) != 0)) {
         fclose(file);
+        rd_log_write("ERROR", "queue state header is invalid path=%s", queue->state_path);
         return -1;
     }
     version = line[3] - '0';
@@ -263,11 +282,16 @@ bad_file:
 }
 
 int rd_queue_init(rd_queue *queue, const char *state_path) {
+    int result;
     if (!queue || !state_path || !*state_path || strlen(state_path) >= sizeof(queue->state_path)) return -1;
     memset(queue, 0, sizeof(*queue));
     strcpy(queue->state_path, state_path);
     queue->next_id = 1;
-    return load_queue(queue);
+    result = load_queue(queue);
+    if (result != 0)
+        rd_log_write("ERROR", "queue initialization failed path=%s errno=%d",
+                     state_path, errno);
+    return result;
 }
 
 int rd_queue_add_batch_preferences(rd_queue *queue,
