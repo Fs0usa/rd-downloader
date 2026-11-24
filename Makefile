@@ -10,7 +10,7 @@ endif
 PS5_DEPLOY ?= $(PS5_PAYLOAD_SDK)/bin/prospero-deploy
 HOST_CC ?= cc
 CA_BUNDLE ?= /etc/ssl/certs/ca-certificates.crt
-RD_VERSION ?= $(shell cat VERSION 2>/dev/null || echo 1.1.2-beta.11)
+RD_VERSION ?= $(shell cat VERSION 2>/dev/null || echo 1.1.2-beta.12)
 VERSION_FLAGS := -DRD_DOWNLOADER_VERSION='"$(RD_VERSION)"'
 
 HOST_GOALS := host-test host-server host-run

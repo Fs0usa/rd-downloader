@@ -1,5 +1,12 @@
 # Changelog
 
+## Beta — 1.1.2-beta.12
+
+- Probe response headers when reviewing links so the dialog can display a server-provided filename and warn on HTML/error responses before the user starts.
+- Use a one-byte HTTP Range request for metadata, follow redirects with TLS downgrade protection, and never save probe data.
+- Create the PS5 partial output path only after final response headers are processed, so the Content-Disposition filename matches the actual on-disk path and extraction path.
+
+
 ## Beta — 1.1.2-beta.11
 
 - Keep URL-derived names within the backend limit and send unchanged suggestions as empty names so the backend derives them consistently. This allows long signed URLs to be queued and lets Content-Disposition supply the real filename.

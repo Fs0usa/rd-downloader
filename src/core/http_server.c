@@ -1229,6 +1229,72 @@ static void handle_client(int fd) {
             static const char error_body[] = "invalid content length\n";
             (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
                                 error_body, sizeof(error_body) - 1U);
+        } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/probe") == 0) {
+            char batch[RD_MAX_URL_LENGTH * 4U + 4U];
+            char response[4096];
+            char escaped_name[1024], escaped_type[256], escaped_error[512];
+            char urls[4][RD_MAX_URL_LENGTH];
+            size_t received, offset;
+            int count, n;
+            body_offset = (size_t)((end_headers + 4) - request);
+            if (!command_header_ok(request) || !body_length || body_length >= sizeof(batch) ||
+                body_offset + body_length > RD_HTTP_MAX_REQUEST) {
+                static const char error_body[] = "invalid metadata probe request\n";
+                (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
+                                    error_body, sizeof(error_body) - 1U);
+                return;
+            }
+            received = used > body_offset ? used - body_offset : 0;
+            if (received > body_length) received = body_length;
+            used = body_offset + received;
+            while (received < body_length) {
+                ssize_t got = recv_before_deadline(fd, request + used,
+                                                   body_length - received, deadline_ms);
+                if (got <= 0) return;
+                used += (size_t)got;
+                received += (size_t)got;
+            }
+            if (memchr(request + body_offset, '\0', body_length) != NULL) {
+                static const char error_body[] = "metadata probe body contains a NUL byte\n";
+                (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
+                                    error_body, sizeof(error_body) - 1U);
+                return;
+            }
+            memcpy(batch, request + body_offset, body_length);
+            batch[body_length] = '\0';
+            count = rd_parse_url_batch(batch, urls, 4);
+            if (count <= 0) {
+                static const char error_body[] = "invalid URL batch (maximum 4 URLs)\n";
+                (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
+                                    error_body, sizeof(error_body) - 1U);
+                return;
+            }
+            n = snprintf(response, sizeof(response), "{\"results\":[");
+            for (int pi = 0; pi < count && n > 0 && (size_t)n < sizeof(response); ++pi) {
+                rd_http_probe_result probe;
+                char probe_error[192] = "";
+                int probe_rc = rd_http_probe(urls[pi], &probe, probe_error, sizeof(probe_error));
+                if (json_escape(probe.filename, escaped_name, sizeof(escaped_name)) != 0 ||
+                    json_escape(probe.content_type, escaped_type, sizeof(escaped_type)) != 0 ||
+                    json_escape(probe_error, escaped_error, sizeof(escaped_error)) != 0) {
+                    n = -1; break;
+                }
+                n += snprintf(response + n, sizeof(response) - (size_t)n,
+                    "%s{\"status\":%d,\"verified\":%s,\"html\":%s,\"filename\":\"%s\",\"contentType\":\"%s\",\"hasLength\":%s,\"length\":%llu,\"error\":\"%s\"}",
+                    pi ? "," : "", probe.status_code, probe_rc == 0 && probe.verified ? "true" : "false",
+                    probe.is_html ? "true" : "false", escaped_name, escaped_type,
+                    probe.has_content_length ? "true" : "false", probe.content_length, escaped_error);
+            }
+            if (n < 0 || (size_t)n + 3U >= sizeof(response)) {
+                static const char error_body[] = "metadata result too large\n";
+                (void)send_response(fd, 500, "Internal Server Error", "text/plain; charset=utf-8",
+                                    error_body, sizeof(error_body) - 1U);
+                return;
+            }
+            offset = (size_t)n;
+            response[offset++] = ']'; response[offset++] = '}'; response[offset] = '\0';
+            (void)send_response(fd, 200, "OK", "application/json; charset=utf-8",
+                                response, offset);
         } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/start") == 0) {
             if (!command_header_ok(request)) {
                 static const char error_body[] = "command header required\n";

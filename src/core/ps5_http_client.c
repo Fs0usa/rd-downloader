@@ -250,6 +250,38 @@ static int response_location(int request_id, char *location, size_t capacity) {
     return -1;
 }
 
+static int response_header_value(int request_id, const char *header_name,
+                                 char *value_out, size_t capacity) {
+    char *headers = NULL;
+    size_t header_size = 0, wanted = strlen(header_name);
+    const char *cursor, *end;
+    if (sceHttpGetAllResponseHeaders(request_id, &headers, &header_size) != 0 ||
+        !headers || header_size > RD_SCE_HTTP_HEADER_LIMIT) return -1;
+    cursor = headers;
+    end = headers + header_size;
+    while (cursor < end) {
+        const char *line_end = cursor, *colon, *value;
+        size_t n;
+        while ((size_t)(end - line_end) >= 2U &&
+               !(line_end[0] == '\r' && line_end[1] == '\n')) ++line_end;
+        if ((size_t)(end - line_end) < 2U || line_end == cursor) break;
+        colon = memchr(cursor, ':', (size_t)(line_end - cursor));
+        if (colon && (size_t)(colon - cursor) == wanted &&
+            !strncasecmp(cursor, header_name, wanted)) {
+            value = colon + 1;
+            while (value < line_end && (*value == ' ' || *value == '\t')) ++value;
+            n = (size_t)(line_end - value);
+            while (n && (value[n - 1U] == ' ' || value[n - 1U] == '\t')) --n;
+            if (!n || n >= capacity) return -1;
+            memcpy(value_out, value, n);
+            value_out[n] = '\0';
+            return 0;
+        }
+        cursor = line_end + 2;
+    }
+    return -1;
+}
+
 static int response_content_length(int request_id,
                                    unsigned long long *content_length) {
     char *headers = NULL;
@@ -419,15 +451,6 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
         }
         return -1;
     }
-    if (rd_output_paths(&output, directory, filename, item_id) != 0) {
-        set_error(error, error_capacity, "download filename or destination path is too long");
-        return -1;
-    }
-    if (lstat(output.final, &st) == 0 || errno != ENOENT ||
-        lstat(output.partial, &st) == 0 || errno != ENOENT) {
-        set_error(error, error_capacity, "download output or partial file already exists");
-        return -1;
-    }
     strcpy(current_url, input_url);
 
     if (!rd_sce_net_initialized) {
@@ -586,6 +609,15 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
                 goto done;
             }
         }
+        if (rd_output_paths(&output, directory, filename, item_id) != 0) {
+            set_error(error, error_capacity, "download filename or destination path is too long");
+            goto done;
+        }
+        if (lstat(output.final, &st) == 0 || errno != ENOENT ||
+            lstat(output.partial, &st) == 0 || errno != ENOENT) {
+            set_error(error, error_capacity, "download output or partial file already exists");
+            goto done;
+        }
         output_fd = rd_output_create(&output);
         if (output_fd < 0) {
             if (errno == EEXIST)
@@ -650,6 +682,109 @@ done:
     if (ssl >= 0) sceSslTerm(ssl);
     if (net_pool >= 0) sceNetPoolDestroy(net_pool);
     return result;
+}
+
+int rd_ps5_http_probe(const char *input_url, rd_http_probe_result *result,
+                      char *error, size_t error_capacity) {
+    char current_url[RD_HTTP_PATH_MAX + RD_HTTP_HOST_MAX + 64U];
+    char next_url[sizeof(current_url)], location[RD_HTTP_LOCATION_MAX];
+    size_t ca_count = 0;
+    int net_pool = -1, ssl = -1, http = -1, template_id = -1;
+    int connection = -1, request = -1, ca_loaded = 0, rc = -1;
+    unsigned int redirects;
+    if (result) memset(result, 0, sizeof(*result));
+    set_error(error, error_capacity, "server response could not be checked");
+    if (!input_url || !result || strlen(input_url) >= sizeof(current_url) ||
+        !valid_http_url(input_url)) {
+        set_error(error, error_capacity, "invalid HTTP or HTTPS URL");
+        return -1;
+    }
+    strcpy(current_url, input_url);
+    if (!rd_sce_net_initialized) {
+        if (sceNetInit() != 0) { set_error(error, error_capacity, "PS5 network initialization failed"); goto done; }
+        rd_sce_net_initialized = 1;
+    }
+    net_pool = sceNetPoolCreate("rd-probe", (int)RD_SCE_NET_POOL_SIZE, 0);
+    if (net_pool < 0) { set_error(error, error_capacity, "PS5 network pool creation failed"); goto done; }
+    ssl = sceSslInit((256U + 4U * RD_CA_BUNDLE_CERT_COUNT) * 1024U);
+    if (ssl < 0) { set_error(error, error_capacity, "PS5 TLS initialization failed"); goto done; }
+    if (load_ca_bundle(ssl, &ca_count) != 0 || ca_count != RD_CA_BUNDLE_CERT_COUNT) {
+        set_error(error, error_capacity, "TLS CA bundle load failed"); goto done;
+    }
+    ca_loaded = 1;
+    http = sceHttpInit(net_pool, ssl, RD_SCE_HTTP_POOL_SIZE);
+    if (http < 0) { set_error(error, error_capacity, "PS5 HTTP initialization failed"); goto done; }
+    template_id = sceHttpCreateTemplate(http, "RDDownloader/1.1", RD_SCE_HTTP_VERSION_1_1, 1);
+    if (template_id < 0 || sceHttpSetAutoRedirect(template_id, 0) != 0 ||
+        sceHttpSetResponseHeaderMaxSize(template_id, RD_SCE_HTTP_HEADER_LIMIT) != 0 ||
+        sceHttpSetResolveTimeOut(template_id, 8000000U) != 0 ||
+        sceHttpSetConnectTimeOut(template_id, 8000000U) != 0 ||
+        sceHttpSetSendTimeOut(template_id, 8000000U) != 0 ||
+        sceHttpSetRecvTimeOut(template_id, 8000000U) != 0 ||
+        sceHttpsEnableOption(template_id, 0xA5U) != 0) {
+        set_error(error, error_capacity, "PS5 HTTP probe TLS or timeout setup failed"); goto done;
+    }
+    for (redirects = 0; redirects <= RD_SCE_REDIRECT_LIMIT; ++redirects) {
+        int status = 0;
+        connection = sceHttpCreateConnectionWithURL(template_id, current_url, 1);
+        if (connection < 0) { set_error(error, error_capacity, "PS5 HTTP probe connection failed"); goto done; }
+        request = sceHttpCreateRequestWithURL2(connection, "GET", current_url, 0);
+        if (request < 0) { set_error(error, error_capacity, "PS5 HTTP probe request failed"); goto done; }
+        if (sceHttpAddRequestHeader(request, "Range", "bytes=0-0", 0) != 0 ||
+            sceHttpAddRequestHeader(request, "Accept-Encoding", "identity", 0) != 0) {
+            set_error(error, error_capacity, "PS5 HTTP probe headers could not be set"); goto done;
+        }
+        {
+            int send_rc = sceHttpSendRequest(request, NULL, 0);
+            if (send_rc != 0) {
+                snprintf(error, error_capacity, "PS5 metadata request/TLS verification failed (0x%08x)",
+                         (unsigned int)send_rc);
+                goto done;
+            }
+        }
+        if (sceHttpGetStatusCode(request, &status) != 0) {
+            set_error(error, error_capacity, "PS5 metadata response status unavailable"); goto done;
+        }
+        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+            if (redirects == RD_SCE_REDIRECT_LIMIT ||
+                response_location(request, location, sizeof(location)) != 0 ||
+                resolve_redirect(current_url, location, next_url, sizeof(next_url)) != 0 ||
+                (!strncasecmp(current_url, "https://", 8U) &&
+                 !strncasecmp(next_url, "http://", 7U))) {
+                set_error(error, error_capacity, "metadata redirect invalid or unsafe"); goto done;
+            }
+            (void)sceHttpDeleteRequest(request); request = -1;
+            (void)sceHttpDeleteConnection(connection); connection = -1;
+            strcpy(current_url, next_url);
+            continue;
+        }
+        result->status_code = status;
+        result->verified = (status == 200 || status == 206);
+        if (response_content_length(request, &result->content_length) == 0)
+            result->has_content_length = 1;
+        (void)response_header_value(request, "Content-Type", result->content_type,
+                                    sizeof(result->content_type));
+        result->is_html = !strncasecmp(result->content_type, "text/html", 9U) ||
+                          !strncasecmp(result->content_type, "application/xhtml+xml", 21U);
+        {
+            char disposition[1024];
+            if (response_header_value(request, "Content-Disposition", disposition,
+                    sizeof(disposition)) == 0)
+                (void)rd_filename_from_content_disposition(disposition, result->filename,
+                                                            sizeof(result->filename));
+        }
+        rc = 0;
+        break;
+    }
+done:
+    if (request >= 0) sceHttpDeleteRequest(request);
+    if (connection >= 0) sceHttpDeleteConnection(connection);
+    if (template_id >= 0) sceHttpDeleteTemplate(template_id);
+    if (http >= 0) sceHttpTerm(http);
+    if (ca_loaded) sceSslUnloadCert(ssl);
+    if (ssl >= 0) sceSslTerm(ssl);
+    if (net_pool >= 0) sceNetPoolDestroy(net_pool);
+    return rc;
 }
 
 int rd_ps5_http_reset_legacy_partial(const char *input_url, const char *directory,

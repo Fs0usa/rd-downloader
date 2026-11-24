@@ -23,6 +23,8 @@
 int rd_ps5_http_download(const char *input_url, const char *directory,
                          char *filename, size_t filename_capacity, unsigned long item_id, rd_http_progress_fn progress,
                          void *context, char *error, size_t error_capacity);
+int rd_ps5_http_probe(const char *input_url, rd_http_probe_result *result,
+                      char *error, size_t error_capacity);
 int rd_ps5_http_reset_legacy_partial(const char *input_url, const char *directory,
                               unsigned long item_id);
 #endif
@@ -677,6 +679,14 @@ done:
     return result;
 }
 
+int rd_http_probe(const char *input_url, rd_http_probe_result *result,
+                  char *error, size_t error_capacity) {
+    (void)input_url;
+    if (result) memset(result, 0, sizeof(*result));
+    set_error(error, error_capacity, "response metadata probing is available on the PS5 payload");
+    return -1;
+}
+
 int rd_http_reset_legacy_partial(const char *input_url, const char *directory, unsigned long item_id) {
     rd_http_url url;
     char filename[192], final_path[768], part_path[784];
@@ -689,6 +699,10 @@ int rd_http_reset_legacy_partial(const char *input_url, const char *directory, u
     return S_ISREG(st.st_mode) ? unlink(part_path) : -1;
 }
 #else
+int rd_http_probe(const char *input_url, rd_http_probe_result *result,
+                  char *error, size_t error_capacity) {
+    return rd_ps5_http_probe(input_url, result, error, error_capacity);
+}
 int rd_http_download(const char *input_url, const char *directory, char *filename, size_t filename_capacity, unsigned long item_id,
                      rd_http_progress_fn progress, void *context,
                      char *error, size_t error_capacity) {

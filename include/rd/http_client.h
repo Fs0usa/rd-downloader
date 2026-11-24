@@ -23,6 +23,16 @@ typedef struct rd_http_response_headers {
     char content_type[128];
 } rd_http_response_headers;
 
+typedef struct rd_http_probe_result {
+    int status_code;
+    int verified;
+    int is_html;
+    int has_content_length;
+    unsigned long long content_length;
+    char filename[512];
+    char content_type[128];
+} rd_http_probe_result;
+
 typedef int (*rd_http_progress_fn)(unsigned long long downloaded,
                                    unsigned long long total, void *context);
 
@@ -37,6 +47,8 @@ int rd_http_parse_response_headers(const char *text, size_t length,
 int rd_http_download(const char *url, const char *directory, char *filename, size_t filename_capacity, unsigned long item_id,
                      rd_http_progress_fn progress, void *context,
                      char *error, size_t error_capacity);
+int rd_http_probe(const char *url, rd_http_probe_result *result,
+                  char *error, size_t error_capacity);
 void rd_http_begin(unsigned long id);
 int rd_http_set_handle(unsigned long id, int handle);
 void rd_http_cancel(unsigned long id);
