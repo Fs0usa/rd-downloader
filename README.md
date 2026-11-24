@@ -13,7 +13,7 @@ Native, single-user PS5 payload for queued direct-link downloads, optional Real-
 
 The workflow above describes the goal, not the current feature set.
 
-## Current implementation status (2026-11-24) — Beta 1.1.2-beta.1
+## Current implementation status (2026-11-24) — Beta 1.1.2-beta.2
 
 **Working PS5 HTTPS download checkpoint (v0.3.0).** The user confirmed that the HTTPS sample download completed on their PS5 with this build. The earlier HTTP service and persisted queue were also confirmed on-console. Current code includes:
 
@@ -94,17 +94,27 @@ make deploy PS5_HOST=192.168.1.123
 
 This target serves the ELF temporarily from the build PC and asks `elfldr` to load its HTTP URI. The URI filename is `rd-downloader.elf`, which gives the process a recognizable name in Payload Manager. The PS5 and build PC must be able to reach each other on the LAN. Raw ELF transfer through `prospero-deploy` uses elfldr's generic `payload.elf` process name.
 
-## GitHub releases and Payload Manager
+## GitHub publishing and Payload Manager
 
-Tag a release as `v1.1.1-beta` (or a later version) and push the tag. The GitHub Actions workflow builds the ELF with the pinned PS5 SDK, attaches the ELF and SHA-256 file to a GitHub release, and updates `payloads.json` with the release version and checksum. Add this raw catalog URL as a custom source in Payload Manager:
+The Payload Manager catalog and installable ELF are stored in this repository. Build the payload, copy it into the catalog, and refresh its checksum/version with:
+
+```sh
+make
+python3 scripts/render-payload-catalog.py \
+  --repository Fs0usa/rd-downloader \
+  --version "v$(cat VERSION)" \
+  --artifact rd-downloader.elf
+```
+
+Commit `payloads.json` and `distribution/rd-downloader.elf`, tag that commit with the corresponding `v...` version, and push it. Payload Manager downloads the ELF from the public raw GitHub URL and verifies its SHA-256 from the catalog. Add this catalog URL as a custom source in Payload Manager:
 
 ```text
 https://raw.githubusercontent.com/OWNER/REPOSITORY/main/payloads.json
 ```
 
-Replace `OWNER/REPOSITORY` with the public GitHub repository path. The release workflow needs Actions to be allowed to write repository contents so it can update the catalog. After the initial beta tag finishes, Payload Manager can install the release and detect future version/checksum changes from the catalog.
+The GitHub Actions workflow can also build a pushed tag and update the catalog and ELF on the default branch. It needs Actions write access to repository contents. After the catalog is present, Payload Manager can install RD Downloader and detect future version/checksum changes.
 
-If the tag push does not start a workflow, open **Actions → Build and publish PS5 beta/release → Run workflow**, enter the existing tag (for example, `v1.1.2-beta.1`), and start it. The workflow builds that tag, publishes its ELF, and updates `payloads.json` on the default branch.
+If the tag push does not start a workflow, open **Actions → Build and publish Payload Manager catalog → Run workflow**, enter the existing tag (for example, `v1.1.2-beta.2`), and start it. Or use the local build and catalog command above.
 
 ## Default destination and storage safety
 

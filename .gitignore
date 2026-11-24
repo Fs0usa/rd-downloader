@@ -1,4 +1,5 @@
 *.elf
+!distribution/rd-downloader.elf
 rd-downloader-host
 *.o
 /build/

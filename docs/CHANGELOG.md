@@ -1,6 +1,6 @@
 # Changelog
 
-## Beta — 1.1.2-beta.1
+## Beta — 1.1.2-beta.2
 
 - Create `/data/homebrew/downloads` with mode 755; report queue readiness separately from download-folder readiness.
 - Save new downloads in `/data/homebrew/downloads`; extract archives and copy `.pkg` files into `/data/homebrew`.

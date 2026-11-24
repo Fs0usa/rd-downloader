@@ -1,4 +1,4 @@
-name: Build and publish PS5 beta/release
+name: Build and publish Payload Manager catalog
 
 on:
   push:
@@ -48,36 +48,21 @@ jobs:
         run: |
           make clean
           make RD_VERSION="${RELEASE_TAG#v}"
-          sha256sum rd-downloader.elf > rd-downloader.elf.sha256
-
-      - name: Publish release ELF
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-        run: |
-          release_args=(--title "RD Downloader $RELEASE_TAG" --generate-notes)
-          if [[ "$RELEASE_TAG" == *-* ]]; then
-            release_args+=(--prerelease)
-          fi
-          gh release create "$RELEASE_TAG" rd-downloader.elf rd-downloader.elf.sha256 \
-            "${release_args[@]}"
 
       - name: Update Payload Manager catalog
         env:
-          GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          digest="$(cut -d ' ' -f 1 rd-downloader.elf.sha256)"
           git fetch origin "$DEFAULT_BRANCH"
           git checkout "$DEFAULT_BRANCH"
           python3 scripts/render-payload-catalog.py \
-            --repository "$REPOSITORY" --version "$VERSION" --sha256 "$digest"
-          if ! git diff --quiet -- payloads.json; then
+            --repository "$REPOSITORY" --version "$VERSION" --artifact rd-downloader.elf
+          if [[ -n "$(git status --porcelain -- payloads.json distribution/rd-downloader.elf)" ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add payloads.json
+            git add payloads.json distribution/rd-downloader.elf
             git commit -m "Update Payload Manager catalog for $VERSION"
             git push origin "$DEFAULT_BRANCH"
           fi
