@@ -15,6 +15,7 @@ static void test_space(void) {
 }
 static void test_archive(void) {
     rd_archive_name a;
+    char legacy_volume[128];
     assert(rd_classify_archive_name("/data/downloads/Game.part01.rar", &a) == 0);
     assert(a.kind == RD_ARCHIVE_RAR_MULTIPART_PART && a.part_number == 1);
     assert(rd_classify_archive_name("Game.part12.rar", &a) == 0);
@@ -23,6 +24,17 @@ static void test_archive(void) {
     assert(rd_classify_archive_name("Game.r00", &a) == 0 &&
            a.kind == RD_ARCHIVE_RAR_LEGACY_VOLUME && a.part_number == 1 &&
            strcmp(a.first_volume, "Game.rar") == 0);
+    assert(rd_classify_archive_name("duplex-risk.of.rain.2.update.v1.08.ps4.rar", &a) == 0 &&
+           a.kind == RD_ARCHIVE_RAR_SINGLE &&
+           strcmp(a.first_volume, "duplex-risk.of.rain.2.update.v1.08.ps4.rar") == 0);
+    for (unsigned int i = 0; i <= 27; ++i) {
+        snprintf(legacy_volume, sizeof(legacy_volume),
+                 "duplex-risk.of.rain.2.update.v1.08.ps4.r%02u", i);
+        assert(rd_classify_archive_name(legacy_volume, &a) == 0);
+        assert(a.kind == RD_ARCHIVE_RAR_LEGACY_VOLUME && a.part_number == i + 1U);
+        assert(strcmp(a.first_volume,
+                      "duplex-risk.of.rain.2.update.v1.08.ps4.rar") == 0);
+    }
     assert(rd_classify_archive_name("Game.001", &a) == 0 && a.kind == RD_ARCHIVE_SPLIT_001);
     assert(rd_classify_archive_name("Game.002", &a) == 0 &&
            a.kind == RD_ARCHIVE_SPLIT_001 && a.part_number == 2 &&

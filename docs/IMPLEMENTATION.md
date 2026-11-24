@@ -4,6 +4,10 @@
 
 Extraction retains the downloaded archive and extracted members. RD Downloader does not approve overwriting existing destination files; a collision makes extraction stop without replacing the existing file. The helper stages each new member under a temporary `.wfm-part-*` name and atomically publishes it only after a successful write. On cancellation or failed writes, it removes only its own uncommitted temporary output. Compound archive handling can remove an intermediate container that the helper itself generated during that same extraction (such as a temporary joined split archive); it does not remove the source archive or unrelated destination files. The optional `.pkg` destination-root promotion copies with exclusive creation, leaves the extracted original in place, and skips an existing root target. Explicitly confirmed queue removal is a separate operation and is not triggered by successful extraction.
 
+## Legacy multipart RAR support
+
+Sets laid out as `name.rar`, `name.r00`, `name.r01`, and subsequent legacy volumes are supported by the extraction path. The queue groups `.r00`–`.r99` with the `.rar` primary and waits for queued archive volumes to finish. WFM's UnRAR backend then requests sibling volume filenames from the same directory as it extracts the primary `.rar`. Host classification tests cover the example `.r00`–`.r27` names. This exact multipart set has not been verified on the PS5; on-console extraction is confirmed so far for a single RAR archive.
+
 ## Current code status (2026-11-23)
 
 This is the first major release checkpoint. The user confirmed direct HTTPS downloading and RAR extraction on the PS5. See [`CHANGELOG.md`](CHANGELOG.md) for the v1.0.0 scope and remaining limitations.
