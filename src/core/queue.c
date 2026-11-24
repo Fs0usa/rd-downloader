@@ -181,7 +181,7 @@ static int load_queue(rd_queue *queue) {
             snprintf(item->error, sizeof(item->error),
                      "Extraction interrupted by payload restart; checking helper task");
         if (version < 5)
-            snprintf(item->destination, sizeof(item->destination), "%s", RD_DEFAULT_DESTINATION);
+            snprintf(item->destination, sizeof(item->destination), "%s", RD_DEFAULT_DOWNLOAD_DIRECTORY);
         n = strcspn(tab, "\r\n");
         if (n == 0 || (n & 1U) || n / 2U >= RD_MAX_URL_LENGTH) goto bad_file;
         for (i = 0; i < n; i += 2U) {
@@ -233,7 +233,7 @@ int rd_queue_add_batch_options(rd_queue *queue, const char (*urls)[RD_MAX_URL_LE
         item->id = candidate->next_id++;
         item->state = RD_JOB_QUEUED;
         item->extract_after_download = !!extract_after_download;
-        snprintf(item->destination, sizeof(item->destination), "%s", RD_DEFAULT_DESTINATION);
+        snprintf(item->destination, sizeof(item->destination), "%s", RD_DEFAULT_DOWNLOAD_DIRECTORY);
         memcpy(item->url, urls[i], url_length + 1U);
         rd_download_filename(item->url, item->filename, sizeof(item->filename));
         if (item->extract_after_download && password && *password)

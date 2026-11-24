@@ -29,9 +29,11 @@
 #define RD_PASSWORD_HEADER_MAX 256U
 
 #ifdef RD_HOST_BUILD
-#define RD_DOWNLOAD_DIRECTORY "/tmp/rd-downloader-host-downloads"
+#define RD_DOWNLOAD_DIRECTORY "/tmp/rd-downloader-host-downloads/downloads"
+#define RD_EXTRACTION_DIRECTORY "/tmp/rd-downloader-host-downloads"
 #else
-#define RD_DOWNLOAD_DIRECTORY RD_DEFAULT_DESTINATION
+#define RD_DOWNLOAD_DIRECTORY RD_DEFAULT_DOWNLOAD_DIRECTORY
+#define RD_EXTRACTION_DIRECTORY RD_DEFAULT_EXTRACTION_DIRECTORY
 #endif
 
 static rd_queue server_queue;
@@ -249,8 +251,8 @@ static int send_queue(int fd) {
         "application/json; charset=utf-8", no_memory, sizeof(no_memory) - 1U);
     pthread_mutex_lock(&queue_mutex);
     n = snprintf(body, RD_HTTP_QUEUE_RESPONSE,
-                 "{\"online\":true,\"dir\":\"%s\",\"canExtract\":true,\"items\":[",
-                 RD_DOWNLOAD_DIRECTORY);
+                 "{\"online\":true,\"dir\":\"%s\",\"extractDir\":\"%s\",\"canExtract\":true,\"items\":[",
+                 RD_DOWNLOAD_DIRECTORY, RD_EXTRACTION_DIRECTORY);
     if (n < 0 || (size_t)n >= RD_HTTP_QUEUE_RESPONSE) goto serialization_failed;
     used = (size_t)n;
     for (i = 0; i < server_queue.count; ++i) {
@@ -669,7 +671,7 @@ static void *download_worker(void *unused) {
                     snprintf(archive_path, sizeof(archive_path), "%s/%s",
                              download_directory(item), item->filename);
                     snprintf(extraction_destination, sizeof(extraction_destination), "%s",
-                             download_directory(item));
+                             RD_EXTRACTION_DIRECTORY);
                     snprintf(password, sizeof(password), "%s", item->extraction_password);
                     (void)rd_queue_update(&server_queue, id, RD_JOB_EXTRACTING,
                                           item->downloaded_bytes, item->expected_bytes, "");
@@ -1085,6 +1087,19 @@ static void handle_client(int fd) {
     }
 }
 
+static int prepare_download_directories(void) {
+    struct stat st;
+#ifdef RD_HOST_BUILD
+    if (mkdir(RD_EXTRACTION_DIRECTORY, 0700) != 0 && errno != EEXIST) return -1;
+#endif
+    if (lstat(RD_EXTRACTION_DIRECTORY, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        access(RD_EXTRACTION_DIRECTORY, W_OK | X_OK) != 0) return -1;
+    if (mkdir(RD_DOWNLOAD_DIRECTORY, 0700) != 0 && errno != EEXIST) return -1;
+    if (lstat(RD_DOWNLOAD_DIRECTORY, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        access(RD_DOWNLOAD_DIRECTORY, W_OK | X_OK) != 0) return -1;
+    return 0;
+}
+
 int rd_http_server_run(const char *bind_address, unsigned short port) {
     struct sockaddr_in address;
     int server_fd;
@@ -1092,10 +1107,10 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
 
 #ifdef RD_HOST_BUILD
     queue_ready = rd_queue_init(&server_queue, "/tmp/rd-downloader-host-queue.db") == 0;
-    if (mkdir(RD_DOWNLOAD_DIRECTORY, 0700) != 0 && errno != EEXIST) queue_ready = 0;
 #else
     queue_ready = rd_queue_init(&server_queue, "/data/rd-downloader-queue.db") == 0;
 #endif
+    if (queue_ready && prepare_download_directories() != 0) queue_ready = 0;
 
     if (queue_ready) {
         for (size_t i = server_queue.count; i > 0; --i) {

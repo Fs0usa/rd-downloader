@@ -2,6 +2,7 @@
 
 ## Unreleased — 1.1.0 development
 
+- Save new downloads in `/data/homebrew/downloads`; extract archives and copy `.pkg` files into `/data/homebrew`.
 - Preserve archive-provided folder structure during extraction.
 - Copy extracted `.pkg` files to the destination root without removing their extracted originals or overwriting existing root files.
 - Clarify that an already-running WFM helper in Payload Manager can be reused; update dashboard retry guidance.

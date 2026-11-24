@@ -4,7 +4,8 @@
 
 #define RD_MAX_URL_LENGTH 4096U
 #define RD_MAX_QUEUE_ITEMS 64U
-#define RD_DEFAULT_DESTINATION "/data/homebrew"
+#define RD_DEFAULT_DOWNLOAD_DIRECTORY "/data/homebrew/downloads"
+#define RD_DEFAULT_EXTRACTION_DIRECTORY "/data/homebrew"
 #define RD_MAX_PASSWORD_LENGTH 256U
 
 typedef enum rd_job_state {

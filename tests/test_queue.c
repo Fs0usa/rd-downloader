@@ -26,9 +26,9 @@ int main(void) {
         char filename[512];
         rd_download_filename(url, filename, sizeof(filename));
         assert(strcmp(filename, "_DLPSGAME.COM_-PPSA21402.rar") == 0);
-        assert(rd_output_paths(&output, "/data/homebrew", url, 10) == 0);
-        assert(strcmp(output.final, "/data/homebrew/_DLPSGAME.COM_-PPSA21402.rar") == 0);
-        assert(strcmp(output.partial, "/data/homebrew/_DLPSGAME.COM_-PPSA21402.rar.part") == 0);
+        assert(rd_output_paths(&output, RD_DEFAULT_DOWNLOAD_DIRECTORY, url, 10) == 0);
+        assert(strcmp(output.final, "/data/homebrew/downloads/_DLPSGAME.COM_-PPSA21402.rar") == 0);
+        assert(strcmp(output.partial, "/data/homebrew/downloads/_DLPSGAME.COM_-PPSA21402.rar.part") == 0);
     }
     assert(rd_parse_url_batch("ftp://example/file", urls, 3) == -2);
     assert(rd_parse_url_batch("https://", urls, 3) == -2);
@@ -72,6 +72,8 @@ int main(void) {
         assert(rd_parse_url_batch("https://one.example/a\nhttps://two.example/b", urls, 3) == 2);
         assert(rd_queue_add_batch(&q, (const char (*)[RD_MAX_URL_LENGTH])urls, 2) == 2);
         assert(q.count == 2 && q.items[0].id == 1 && q.items[1].id == 2);
+        assert(strcmp(q.items[0].destination, RD_DEFAULT_DOWNLOAD_DIRECTORY) == 0);
+        assert(strcmp(q.items[1].destination, RD_DEFAULT_DOWNLOAD_DIRECTORY) == 0);
         assert(rd_queue_update(&q, 1, RD_JOB_DOWNLOADING, 5, 10, "") == 0);
         assert(rd_queue_init(&restored, path) == 0);
         assert(restored.count == 2 && strcmp(restored.items[1].url, urls[1]) == 0);

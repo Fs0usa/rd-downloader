@@ -9,7 +9,7 @@ Native, single-user PS5 payload for queued direct-link downloads, optional Real-
 3. Downloads run with bounded file concurrency and per-file range workers when the origin supports byte ranges; otherwise they fall back to sequential streaming.
 4. Completed downloads are verified and inspected for archive type / multipart naming.
 5. The user can extract manually or enable extract-after-download. Passwords are supplied per archive/task and remain backend-only.
-6. Output is published to the selected destination, defaulting to `/data/homebrew` after runtime validation.
+6. Download files are published to `/data/homebrew/downloads`. Archive contents are extracted to `/data/homebrew`; `.pkg` files are also copied to that root.
 
 The workflow above describes the goal, not the current feature set.
 
@@ -42,9 +42,9 @@ Still missing: WFM extraction IPC (the toggle saves the choice and archive jobs 
 - `POST /api/start` remains available to wake queued jobs. Include `X-RD-Command: 1`.
 - `DELETE /api/queue/{id}` removes an item. On an active transfer it aborts the request, deletes the owned partial file after worker cleanup, and removes the queue entry. The dashboard requires a second confirmation. Removing a completed item keeps its file.
 
-The custom header makes browser cross-origin requests require a CORS preflight, which this server does not allow. This is a CSRF mitigation for the same-origin dashboard, not user authentication; use the service only on a trusted local network. The PS5 stores queue data at `/data/rd-downloader-queue.db` with mode 0600 and atomic replacement; Linux host mode uses `/tmp/rd-downloader-host-queue.db`. The prior HTTPS checkpoint was confirmed on-console; the current queue migration and stop/remove changes still need console validation. Files are saved as the sanitized URL basename under `/data/homebrew`, with `.part` appended while incomplete.
+The custom header makes browser cross-origin requests require a CORS preflight, which this server does not allow. This is a CSRF mitigation for the same-origin dashboard, not user authentication; use the service only on a trusted local network. The PS5 stores queue data at `/data/rd-downloader-queue.db` with mode 0600 and atomic replacement; Linux host mode uses `/tmp/rd-downloader-host-queue.db`. New files are saved as the sanitized URL basename under `/data/homebrew/downloads`, with `.part` appended while incomplete. Archive members and `.pkg` copies go to `/data/homebrew`.
 
-The PS5 transport uses `libSceHttp` with explicit TLS verification options and an embedded CA bundle generated from Debian's `ca-certificates` package. The user confirmed a direct HTTPS sample completed on the PS5. The transport follows up to five redirects, refuses HTTPS-to-HTTP redirects, writes a bounded stream to a unique `.part` file under `/data/homebrew`, checks known `Content-Length` against free space plus a 16 MiB reserve, flushes the file, and renames it only after a complete response. It refuses to overwrite an existing result or stale `.part` file. Unknown-length transfers have no preflight estimate. If the payload restarts during a transfer, the job becomes failed and its partial file remains; automatic resume is not implemented. Host builds retain the POSIX HTTP path and do not exercise PS5 TLS.
+The PS5 transport uses `libSceHttp` with explicit TLS verification options and an embedded CA bundle generated from Debian's `ca-certificates` package. The user confirmed direct HTTPS downloads, including the Real-Debrid CDN, on the PS5. The transport follows up to five redirects, refuses HTTPS-to-HTTP redirects, writes a bounded stream to a unique `.part` file under `/data/homebrew/downloads`, checks known `Content-Length` against free space plus a 16 MiB reserve, flushes the file, and renames it only after a complete response. It refuses to overwrite an existing result or stale `.part` file. Unknown-length transfers have no preflight estimate. If the payload restarts during a transfer, the job becomes failed and its partial file remains; automatic resume is not implemented. Host builds retain the POSIX HTTP path and do not exercise PS5 TLS.
 
 ### Small PS5 download smoke test
 
@@ -56,7 +56,7 @@ dd if=/dev/urandom of=/tmp/rd-mvp-fixture/hello.bin bs=1024 count=16 status=none
 python3 -m http.server 8091 --bind 0.0.0.0 --directory /tmp/rd-mvp-fixture
 ```
 
-After deploying the new ELF, open its page, remove any old test queue entries, add `http://PC_LAN_IP:8091/hello.bin`, and confirm the download settings. The expected output is `/data/homebrew/hello.bin`. This test exercises plain HTTP only and writes a 16 KiB file.
+After deploying the new ELF, open its page, remove any old test queue entries, add `http://PC_LAN_IP:8091/hello.bin`, and confirm the download settings. The expected output is `/data/homebrew/downloads/hello.bin`. This test exercises plain HTTP only and writes a 16 KiB file.
 
 Example from a computer on the LAN:
 
@@ -88,7 +88,7 @@ To run the HTTP service locally on the PC, open two terminals in this directory.
 
 ## Default destination and storage safety
 
-The configured default output path is `/data/homebrew`. Destination selection and USB discovery are not implemented. The downloader checks that the path is available and checks known file sizes against free space; it does not silently select another destination.
+The configured download path is `/data/homebrew/downloads`; extracted files go to `/data/homebrew`. Destination selection and USB discovery are not implemented. The service checks that the extraction root is an accessible directory, creates and validates the downloads subdirectory at startup, and checks known file sizes against free space; it does not silently select another destination.
 
 Preflight must reserve space for downloaded archives + known expanded size + safety margin. If expanded size is unknown, preflight is explicitly provisional and extraction must perform per-file and write-time free-space checks. On ENOSPC or destination removal, pause safely, retain partial state, and allow resume after the user frees space or reconnects storage.
 
