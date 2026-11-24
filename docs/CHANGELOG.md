@@ -1,5 +1,10 @@
 # Changelog
 
+## Beta — 1.1.2-beta.5
+
+- Replace the PS5 `access(W_OK)` destination check with an actual temporary-file write probe, avoiding false permission failures when real and effective UIDs differ.
+- Record real/effective UID details at startup and on write-probe failures.
+
 ## Beta — 1.1.2-beta.4
 
 - Log backend errors and key lifecycle events to `/data/homebrew/downloads/rd-downloader.log`; URLs and archive passwords are excluded.

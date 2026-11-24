@@ -76,6 +76,38 @@ static void set_error(char *error, size_t capacity, const char *message) {
     }
 }
 
+static int probe_directory_write(const char *directory, unsigned long item_id,
+                                 char *error, size_t error_capacity) {
+    char path[RD_HTTP_PATH_MAX];
+    unsigned char byte = 0;
+    int fd, saved_errno = 0;
+    int length = snprintf(path, sizeof(path), "%s/.rd-write-probe-%lu-XXXXXX",
+                          directory, item_id);
+    if (length < 0 || (size_t)length >= sizeof(path)) {
+        set_error(error, error_capacity, "destination probe path is too long");
+        return -1;
+    }
+    fd = mkstemp(path);
+    if (fd < 0) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity,
+                     "cannot create destination write probe (errno=%d mode/owner checked at startup)",
+                     errno);
+        return -1;
+    }
+    errno = 0;
+    if (write(fd, &byte, sizeof(byte)) != (ssize_t)sizeof(byte)) saved_errno = errno ? errno : EIO;
+    if (close(fd) != 0 && !saved_errno) saved_errno = errno;
+    if (unlink(path) != 0 && !saved_errno) saved_errno = errno;
+    if (saved_errno) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "destination write probe failed (errno=%d)", saved_errno);
+        errno = saved_errno;
+        return -1;
+    }
+    return 0;
+}
+
 static int write_all(int fd, const void *data, size_t length) {
     const unsigned char *cursor = (const unsigned char *)data;
     while (length) {
@@ -342,12 +374,16 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
         set_error(error, error_capacity, "destination is not a directory");
         return -1;
     }
-    if (access(directory, W_OK) != 0) {
-        if (error && error_capacity)
-            snprintf(error, error_capacity,
-                     "destination access check failed (errno=%d mode=%04o uid=%u gid=%u)",
-                     errno, (unsigned int)(st.st_mode & 07777),
-                     (unsigned int)st.st_uid, (unsigned int)st.st_gid);
+    if (probe_directory_write(directory, item_id, error, error_capacity) != 0) {
+        if (error && error_capacity) {
+            size_t used = strlen(error);
+            if (used < error_capacity)
+                snprintf(error + used, error_capacity - used,
+                         " mode=%04o uid=%u gid=%u ruid=%u euid=%u",
+                         (unsigned int)(st.st_mode & 07777),
+                         (unsigned int)st.st_uid, (unsigned int)st.st_gid,
+                         (unsigned int)getuid(), (unsigned int)geteuid());
+        }
         return -1;
     }
     if (rd_output_paths(&output, directory, input_url, item_id) != 0) {

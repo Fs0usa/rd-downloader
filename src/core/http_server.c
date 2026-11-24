@@ -1550,10 +1550,11 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
     if (download_directory_ready) {
         struct stat directory_stat;
         if (stat(RD_DOWNLOAD_DIRECTORY, &directory_stat) == 0)
-            rd_log_write("INFO", "service started version=%s download_directory=%s mode=%04o uid=%u gid=%u",
+            rd_log_write("INFO", "service started version=%s download_directory=%s mode=%04o uid=%u gid=%u ruid=%u euid=%u",
                       RD_DOWNLOADER_VERSION, RD_DOWNLOAD_DIRECTORY,
                       (unsigned int)(directory_stat.st_mode & 07777),
-                      (unsigned int)directory_stat.st_uid, (unsigned int)directory_stat.st_gid);
+                      (unsigned int)directory_stat.st_uid, (unsigned int)directory_stat.st_gid,
+                      (unsigned int)getuid(), (unsigned int)geteuid());
         else rd_log_write("ERROR", "service started version=%s download_directory=%s stat_errno=%d",
                        RD_DOWNLOADER_VERSION, RD_DOWNLOAD_DIRECTORY, errno);
     } else if (queue_ready) {
