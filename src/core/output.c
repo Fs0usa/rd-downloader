@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -47,12 +48,40 @@ void rd_download_filename(const char *url, char *filename, size_t capacity) {
         snprintf(filename, capacity, "download.bin");
 }
 
-int rd_output_paths(rd_output *out, const char *directory, const char *url, unsigned long id) {
-    char name[256];
+int rd_filename_from_content_disposition(const char *header, char *filename, size_t capacity) {
+    const char *p, *start = NULL, *end;
+    size_t n, i;
+    if (!header || !filename || !capacity) return -1;
+    for (p = header; *p; ++p) {
+        if ((p == header || p[-1] == ';' || p[-1] == ' ' || p[-1] == '\t') &&
+            !strncasecmp(p, "filename=", 9U)) { start = p + 9; break; }
+    }
+    if (!start) return -1;
+    if (*start == '"') { ++start; end = strchr(start, '"'); }
+    else { end = strchr(start, ';'); if (!end) end = start + strlen(start); }
+    if (!end || end <= start) return -1;
+    n = (size_t)(end - start);
+    if (n > 250U || n >= capacity || !strncmp(start, ".", n) || !strncmp(start, "..", n)) return -1;
+    for (i = 0; i < n; ++i) {
+        unsigned char c = (unsigned char)start[i];
+        if (c < 0x20U || c == 0x7fU || c == '/' || c == '\\' || c == ':') return -1;
+    }
+    memcpy(filename, start, n);
+    filename[n] = '\0';
+    return 0;
+}
+
+int rd_output_paths(rd_output *out, const char *directory, const char *filename, unsigned long id) {
     int final_length, partial_length, owner_length;
-    if (!out || !directory || !url || !id) return -1;
-    rd_download_filename(url, name, sizeof(name));
-    final_length = snprintf(out->final, sizeof(out->final), "%s/%s", directory, name);
+    size_t i, length;
+    if (!out || !directory || !filename || !id) return -1;
+    length = strlen(filename);
+    if (!length || length > 250U || !strcmp(filename, ".") || !strcmp(filename, "..")) return -1;
+    for (i = 0; i < length; ++i) {
+        unsigned char c = (unsigned char)filename[i];
+        if (c < 0x20U || c == 0x7fU || c == '/' || c == '\\' || c == ':') return -1;
+    }
+    final_length = snprintf(out->final, sizeof(out->final), "%s/%s", directory, filename);
     if (final_length < 0 || (size_t)final_length >= sizeof(out->final)) return -1;
     partial_length = snprintf(out->partial, sizeof(out->partial), "%s.part", out->final);
     if (partial_length < 0 || (size_t)partial_length >= sizeof(out->partial)) return -1;

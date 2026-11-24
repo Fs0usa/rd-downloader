@@ -21,7 +21,7 @@
 
 #ifndef RD_HOST_BUILD
 int rd_ps5_http_download(const char *input_url, const char *directory,
-                         unsigned long item_id, rd_http_progress_fn progress,
+                         char *filename, size_t filename_capacity, unsigned long item_id, rd_http_progress_fn progress,
                          void *context, char *error, size_t error_capacity);
 int rd_ps5_http_reset_legacy_partial(const char *input_url, const char *directory,
                               unsigned long item_id);
@@ -181,6 +181,14 @@ int rd_http_parse_response_headers(const char *text, size_t length,
             if (value_length == 0 || value_length >= sizeof(headers->location)) return -1;
             memcpy(headers->location, value, value_length);
             headers->location[value_length] = '\0';
+        } else if (name_length == 19U && strncasecmp(cursor, "Content-Disposition", name_length) == 0) {
+            if (!value_length || value_length >= sizeof(headers->content_disposition)) return -1;
+            memcpy(headers->content_disposition, value, value_length);
+            headers->content_disposition[value_length] = '\0';
+        } else if (name_length == 12U && strncasecmp(cursor, "Content-Type", name_length) == 0) {
+            if (value_length >= sizeof(headers->content_type)) return -1;
+            memcpy(headers->content_type, value, value_length);
+            headers->content_type[value_length] = '\0';
         }
         cursor = end + 2;
     }
@@ -489,7 +497,7 @@ static int receive_to_file(rd_socket_reader *reader, int file_fd,
     return 0;
 }
 
-int rd_http_download(const char *input_url, const char *directory, unsigned long item_id,
+int rd_http_download(const char *input_url, const char *directory, char *filename, size_t filename_capacity, unsigned long item_id,
                      rd_http_progress_fn progress, void *context,
                      char *error, size_t error_capacity) {
     char url_text[RD_HTTP_PATH_MAX + RD_HTTP_HOST_MAX + 32U];
@@ -503,9 +511,11 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
     struct stat st;
     struct statvfs space;
     unsigned long long received = 0;
+    char url_filename[512];
+    int use_server_name;
 
     set_error(error, error_capacity, "download failed");
-    if (!input_url || !directory || item_id == 0 || strlen(input_url) >= sizeof(url_text)) {
+    if (!input_url || !directory || !filename || !filename_capacity || item_id == 0 || strlen(input_url) >= sizeof(url_text)) {
         set_error(error, error_capacity, "invalid URL or destination");
         return -1;
     }
@@ -514,6 +524,8 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
         return -1;
     }
     strcpy(url_text, input_url);
+    rd_download_filename(input_url, url_filename, sizeof(url_filename));
+    use_server_name = strcmp(filename, url_filename) == 0;
     if (mkdir(directory, 0755) == 0) destination_created = 1;
     else if (errno != EEXIST) {
         snprintf(error, error_capacity, "cannot create destination directory (errno=%d)", errno);
@@ -583,7 +595,19 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
             set_error(error, error_capacity, message);
             goto done;
         }
-        if (rd_output_paths(&output, directory, input_url, item_id) != 0) {
+        if (use_server_name && headers.content_disposition[0]) {
+            char server_filename[512];
+            if (rd_filename_from_content_disposition(headers.content_disposition,
+                    server_filename, sizeof(server_filename)) == 0 &&
+                strlen(server_filename) < filename_capacity)
+                snprintf(filename, filename_capacity, "%s", server_filename);
+        }
+        if (strncasecmp(headers.content_type, "text/html", 9U) == 0 ||
+            strncasecmp(headers.content_type, "application/xhtml+xml", 21U) == 0) {
+            set_error(error, error_capacity, "server returned a web page, not a downloadable file");
+            goto done;
+        }
+        if (rd_output_paths(&output, directory, filename, item_id) != 0) {
             set_error(error, error_capacity, "filename or output path is too long");
             goto done;
         }
@@ -665,10 +689,10 @@ int rd_http_reset_legacy_partial(const char *input_url, const char *directory, u
     return S_ISREG(st.st_mode) ? unlink(part_path) : -1;
 }
 #else
-int rd_http_download(const char *input_url, const char *directory, unsigned long item_id,
+int rd_http_download(const char *input_url, const char *directory, char *filename, size_t filename_capacity, unsigned long item_id,
                      rd_http_progress_fn progress, void *context,
                      char *error, size_t error_capacity) {
-    return rd_ps5_http_download(input_url, directory, item_id, progress,
+    return rd_ps5_http_download(input_url, directory, filename, filename_capacity, item_id, progress,
                                 context, error, error_capacity);
 }
 int rd_http_reset_legacy_partial(const char *input_url, const char *directory, unsigned long item_id) {

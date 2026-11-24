@@ -375,7 +375,7 @@ static int make_output_path(const char *directory, const char *url,
 }
 
 int rd_ps5_http_download(const char *input_url, const char *directory,
-                         unsigned long item_id, rd_http_progress_fn progress,
+                         char *filename, size_t filename_capacity, unsigned long item_id, rd_http_progress_fn progress,
                          void *context, char *error, size_t error_capacity) {
     char current_url[RD_HTTP_PATH_MAX + RD_HTTP_HOST_MAX + 64U];
     char next_url[sizeof(current_url)];
@@ -389,14 +389,18 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
     struct stat st;
     struct statvfs space;
     unsigned long long expected = 0, received = 0;
+    char url_filename[512];
+    int use_server_name;
     unsigned char *buffer = NULL;
 
     set_error(error, error_capacity, "HTTPS transfer failed");
-    if (!input_url || !directory || !item_id || strlen(input_url) >= sizeof(current_url) ||
+    if (!input_url || !directory || !filename || !filename_capacity || !item_id || strlen(input_url) >= sizeof(current_url) ||
         !valid_http_url(input_url)) {
         set_error(error, error_capacity, "only valid HTTP and HTTPS URLs are supported");
         return -1;
     }
+    rd_download_filename(input_url, url_filename, sizeof(url_filename));
+    use_server_name = strcmp(filename, url_filename) == 0;
     if (ensure_download_directory(directory, error, error_capacity) != 0) return -1;
     if (stat(directory, &st) != 0) {
         if (error && error_capacity)
@@ -415,7 +419,7 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
         }
         return -1;
     }
-    if (rd_output_paths(&output, directory, input_url, item_id) != 0) {
+    if (rd_output_paths(&output, directory, filename, item_id) != 0) {
         set_error(error, error_capacity, "download filename or destination path is too long");
         return -1;
     }
@@ -510,6 +514,58 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
         if (status != 200) {
             snprintf(error, error_capacity, "server returned HTTP status %d", status);
             goto done;
+        }
+        if (use_server_name) {
+            char *headers = NULL;
+            size_t header_size = 0;
+            if (sceHttpGetAllResponseHeaders(request, &headers, &header_size) == 0 &&
+                headers && header_size <= RD_SCE_HTTP_HEADER_LIMIT) {
+                const char *cursor = headers, *end = headers + header_size;
+                while (cursor < end) {
+                    const char *line_end = cursor, *colon;
+                    while ((size_t)(end - line_end) >= 2U &&
+                           !(line_end[0] == '\r' && line_end[1] == '\n')) ++line_end;
+                    if ((size_t)(end - line_end) < 2U || line_end == cursor) break;
+                    colon = memchr(cursor, ':', (size_t)(line_end - cursor));
+                    if (colon && (size_t)(colon - cursor) == 19U &&
+                        !strncasecmp(cursor, "Content-Disposition", 19U)) {
+                        char disposition[1024], candidate[512];
+                        const char *value = colon + 1;
+                        size_t value_len;
+                        while (value < line_end && (*value == ' ' || *value == '\t')) ++value;
+                        value_len = (size_t)(line_end - value);
+                        if (value_len < sizeof(disposition)) {
+                            memcpy(disposition, value, value_len); disposition[value_len] = '\0';
+                            if (rd_filename_from_content_disposition(disposition, candidate,
+                                    sizeof(candidate)) == 0 && strlen(candidate) < filename_capacity)
+                                snprintf(filename, filename_capacity, "%s", candidate);
+                        }
+                        break;
+                    }
+                    cursor = line_end + 2;
+                }
+            }
+        }
+        {
+            char *headers = NULL;
+            size_t header_size = 0;
+            if (sceHttpGetAllResponseHeaders(request, &headers, &header_size) == 0 &&
+                headers && header_size <= RD_SCE_HTTP_HEADER_LIMIT) {
+                const char *p = headers;
+                while ((size_t)(headers + header_size - p) > 10U) {
+                    if (!strncasecmp(p, "Content-Type:", 13U)) {
+                        const char *v = p + 13;
+                        while (*v == ' ' || *v == '\t') ++v;
+                        if (!strncasecmp(v, "text/html", 9U) ||
+                            !strncasecmp(v, "application/xhtml+xml", 21U)) {
+                            set_error(error, error_capacity, "server returned a web page, not a downloadable file");
+                            goto done;
+                        }
+                        break;
+                    }
+                    ++p;
+                }
+            }
         }
         if (response_content_length(request, &expected) != 0) expected = 0;
         if (expected) {

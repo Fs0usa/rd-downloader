@@ -83,8 +83,14 @@ int rd_queue_add_batch_preferences(rd_queue *queue,
                                    const char (*urls)[RD_MAX_URL_LENGTH], size_t count,
                                    int extract_after_download, int extract_nested_archives,
                                    const char *password);
+int rd_queue_add_batch_named_preferences(rd_queue *queue,
+                                   const char (*urls)[RD_MAX_URL_LENGTH],
+                                   const char (*filenames)[512], size_t count,
+                                   int extract_after_download, int extract_nested_archives,
+                                   const char *password);
 int rd_queue_record_related_file(rd_queue *queue, unsigned long item_id,
                                  const char *filename);
+int rd_queue_set_filename(rd_queue *queue, unsigned long item_id, const char *filename);
 int rd_queue_has_related_file(const rd_queue *queue, unsigned long item_id,
                               const char *filename);
 int rd_queue_set_retry(rd_queue *queue, unsigned long item_id,

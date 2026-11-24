@@ -33,7 +33,7 @@ int main(void) {
     assert(rd_http_parse_response_headers(chunked, sizeof(chunked), &headers) == 0);
     assert(headers.status_code == 200 && headers.chunked && !headers.has_content_length);
     assert(rd_http_parse_response_headers(duplicate, sizeof(duplicate), &headers) != 0);
-    assert(rd_http_download("https://example.com/file", "/tmp", 1, NULL, NULL,
+    assert(rd_http_download("https://example.com/file", "/tmp", "file", 5, 1, NULL, NULL,
                             error, sizeof(error)) != 0);
     assert(strstr(error, "plain HTTP") != NULL);
     rd_http_begin(99);

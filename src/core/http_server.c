@@ -232,11 +232,12 @@ static int decode_form_value(const char *src, size_t length, char *out, size_t c
 }
 
 static int parse_add_form(const char *body, size_t length, char *urls, size_t urls_capacity,
+                          char *names, size_t names_capacity,
                           char *extract, size_t extract_capacity,
                           char *nested, size_t nested_capacity,
                           char *password, size_t password_capacity) {
     size_t offset = 0;
-    int have_urls = 0, have_extract = 0, have_nested = 0, have_password = 0;
+    int have_urls = 0, have_names = 0, have_extract = 0, have_nested = 0, have_password = 0;
     while (offset < length) {
         size_t end = offset, equal;
         char key[16];
@@ -247,6 +248,9 @@ static int parse_add_form(const char *body, size_t length, char *urls, size_t ur
         if (strcmp(key, "urls") == 0) {
             if (have_urls++ || equal == end || decode_form_value(body + equal + 1, end - equal - 1,
                 urls, urls_capacity, 1) != 0) return -1;
+        } else if (strcmp(key, "names") == 0) {
+            if (have_names++ || equal == end || decode_form_value(body + equal + 1, end - equal - 1,
+                names, names_capacity, 1) != 0) return -1;
         } else if (strcmp(key, "extract") == 0) {
             if (have_extract++ || equal == end || decode_form_value(body + equal + 1, end - equal - 1,
                 extract, extract_capacity, 0) != 0) return -1;
@@ -259,7 +263,7 @@ static int parse_add_form(const char *body, size_t length, char *urls, size_t ur
         } else return -1;
         offset = end + 1;
     }
-    return have_urls && have_extract && have_nested && have_password ? 0 : -1;
+    return have_urls && have_names && have_extract && have_nested && have_password ? 0 : -1;
 }
 
 static int json_escape(const char *input, char *output, size_t capacity) {
@@ -355,6 +359,7 @@ typedef struct rd_progress_context {
     unsigned long long started_ms;
     unsigned long long previous_ms;
     unsigned long long previous_bytes;
+    const char *filename;
 } rd_progress_context;
 
 static unsigned long long monotonic_ms(void) {
@@ -393,6 +398,11 @@ static int record_progress(unsigned long long downloaded, unsigned long long exp
             continue;
         }
         if (item->state != RD_JOB_DOWNLOADING) break;
+        if (context->filename && strcmp(item->filename, context->filename) != 0 &&
+            rd_queue_set_filename(&server_queue, context->id, context->filename) != 0) {
+            found = 0;
+            break;
+        }
         item->downloaded_bytes = downloaded;
         item->expected_bytes = expected;
         if (context->previous_ms && now > context->previous_ms && downloaded >= context->previous_bytes)
@@ -431,7 +441,7 @@ static int discard_output(const rd_queue_item *item, int include_final) {
     rd_output output;
     if (item->legacy_partial)
         return rd_http_reset_legacy_partial(item->url, directory, item->id);
-    if (rd_output_paths(&output, directory, item->url, item->id)) return -1;
+    if (rd_output_paths(&output, directory, item->filename, item->id)) return -1;
     return rd_output_discard(&output, include_final);
 }
 
@@ -454,7 +464,7 @@ static int finish_removal(rd_queue_item *item, int delete_downloads) {
     }
     if (item->legacy_partial) {
         if (rd_http_reset_legacy_partial(item->url, directory, item->id) != 0) return -1;
-    } else if (rd_output_paths(&output, directory, item->url, item->id) != 0 ||
+    } else if (rd_output_paths(&output, directory, item->filename, item->id) != 0 ||
                rd_output_discard(&output, !!delete_downloads) != 0) return -1;
     if (delete_downloads) {
         for (i = 0; i < server_queue.related_file_count; ++i) {
@@ -495,7 +505,7 @@ static int finish_removal(rd_queue_item *item, int delete_downloads) {
                 } else {
                     rd_output sibling_output;
                     if (rd_output_paths(&sibling_output, download_directory(sibling),
-                                        sibling->url, sibling->id) != 0 ||
+                                        sibling->filename, sibling->id) != 0 ||
                         rd_output_discard(&sibling_output, 1) != 0) return -1;
                 }
                 for (i = 0; i < server_queue.related_file_count; ++i) {
@@ -1104,9 +1114,10 @@ static void *download_worker(void *unused) {
         progress.started_ms = monotonic_ms();
         progress.previous_ms = 0;
         progress.previous_bytes = 0;
+        progress.filename = filename;
         rd_log_write("INFO", "download started id=%lu file=%s destination=%s",
                      id, filename, destination);
-        result = rd_http_download(url, destination, id, record_progress,
+        result = rd_http_download(url, destination, filename, sizeof(filename), id, record_progress,
                                   &progress, error, sizeof(error));
         rd_log_write(result == 0 ? "INFO" : "ERROR",
                      "download %s id=%lu file=%s destination=%s%s%s",
@@ -1118,6 +1129,9 @@ static void *download_worker(void *unused) {
         for (i = 0; i < server_queue.count; ++i) {
             rd_queue_item *item = &server_queue.items[i];
             if (item->id != id) continue;
+            if (strcmp(item->filename, filename) != 0 &&
+                rd_queue_set_filename(&server_queue, id, filename) == 0)
+                item = &server_queue.items[i];
             if (item->state == RD_JOB_CANCELLED) {
                 if (finish_removal(item, item->remove_downloads_on_cancel))
                     (void)rd_queue_update(&server_queue, id, RD_JOB_FAILED,
@@ -1257,10 +1271,12 @@ static void handle_client(int fd) {
         } else if (strcmp(method, "POST") == 0 &&
                    (strcmp(path, "/api/queue") == 0 || strcmp(path, "/api/add") == 0)) {
             char urls[4][RD_MAX_URL_LENGTH];
+            char names[4][512] = {{0}};
             char password[RD_PASSWORD_HEADER_MAX] = "";
             char extract_setting[8] = "1";
             char nested_setting[8] = "0";
             char url_batch[RD_HTTP_MAX_BODY + 1U];
+            char name_batch[4U * 512U + 4U] = "";
             int extract_enabled = 1;
             int form_request = strcmp(path, "/api/add") == 0;
             int count;
@@ -1298,6 +1314,7 @@ static void handle_client(int fd) {
             request[body_offset + body_length] = '\0';
             if (form_request) {
                 if (parse_add_form(request + body_offset, body_length, url_batch, sizeof(url_batch),
+                                   name_batch, sizeof(name_batch),
                                    extract_setting, sizeof(extract_setting), nested_setting,
                                    sizeof(nested_setting), password, sizeof(password)) != 0) {
                     static const char error_body[] = "invalid add form\n";
@@ -1333,6 +1350,21 @@ static void handle_client(int fd) {
             }
             count = rd_parse_url_batch(url_batch, urls, 4);
             extract_enabled = strcmp(extract_setting, "1") == 0;
+            if (form_request && count > 0) {
+                char *cursor = name_batch;
+                int name_count = 0;
+                while (name_count < count) {
+                    char *line_end = strchr(cursor, '\n');
+                    size_t name_length = line_end ? (size_t)(line_end - cursor) : strlen(cursor);
+                    if (name_length >= sizeof(names[0])) { count = -1; break; }
+                    memcpy(names[name_count], cursor, name_length);
+                    names[name_count][name_length] = '\0';
+                    ++name_count;
+                    if (!line_end) break;
+                    cursor = line_end + 1;
+                }
+                if (name_count != count || (name_count && strchr(cursor, '\n'))) count = -1;
+            }
             if (count <= 0) {
                 static const char error_body[] = "invalid URL batch (maximum 4 URLs per request)\n";
                 (void)send_response(fd, 400, "Bad Request", "text/plain; charset=utf-8",
@@ -1340,8 +1372,9 @@ static void handle_client(int fd) {
             } else {
                 int add_result;
                 pthread_mutex_lock(&queue_mutex);
-                add_result = rd_queue_add_batch_preferences(&server_queue,
-                    (const char (*)[RD_MAX_URL_LENGTH])urls, (size_t)count,
+                add_result = rd_queue_add_batch_named_preferences(&server_queue,
+                    (const char (*)[RD_MAX_URL_LENGTH])urls,
+                    form_request ? (const char (*)[512])names : NULL, (size_t)count,
                     extract_enabled, extract_enabled && strcmp(nested_setting, "1") == 0,
                     password);
                 if (add_result >= 0) {

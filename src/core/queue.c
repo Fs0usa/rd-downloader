@@ -267,7 +267,7 @@ static int load_queue(rd_queue *queue) {
             item->url[i / 2U] = (char)byte;
         }
         if (!has_http_scheme(item->url, strlen(item->url))) goto bad_file;
-        rd_download_filename(item->url, item->filename, sizeof(item->filename));
+        if (!item->filename[0]) rd_download_filename(item->url, item->filename, sizeof(item->filename));
         ++queue->count;
     }
     if (ferror(file)) goto bad_file;
@@ -298,6 +298,15 @@ int rd_queue_add_batch_preferences(rd_queue *queue,
                                    const char (*urls)[RD_MAX_URL_LENGTH], size_t count,
                                    int extract_after_download, int extract_nested_archives,
                                    const char *password) {
+    return rd_queue_add_batch_named_preferences(queue, urls, NULL, count,
+        extract_after_download, extract_nested_archives, password);
+}
+
+int rd_queue_add_batch_named_preferences(rd_queue *queue,
+                                   const char (*urls)[RD_MAX_URL_LENGTH],
+                                   const char (*filenames)[512], size_t count,
+                                   int extract_after_download, int extract_nested_archives,
+                                   const char *password) {
     rd_queue *candidate;
     size_t i;
     if (!queue || (!urls && count) || queue->count > RD_MAX_QUEUE_ITEMS ||
@@ -318,7 +327,19 @@ int rd_queue_add_batch_preferences(rd_queue *queue,
         item->extract_nested_archives = !!extract_nested_archives;
         snprintf(item->destination, sizeof(item->destination), "%s", RD_DEFAULT_DOWNLOAD_DIRECTORY);
         memcpy(item->url, urls[i], url_length + 1U);
-        rd_download_filename(item->url, item->filename, sizeof(item->filename));
+        if (filenames && filenames[i][0]) {
+            size_t name_length = strnlen(filenames[i], sizeof(item->filename));
+            size_t j;
+            if (!name_length || name_length >= sizeof(item->filename) || name_length > 250U ||
+                !strcmp(filenames[i], ".") || !strcmp(filenames[i], "..")) { free(candidate); return -1; }
+            for (j = 0; j < name_length; ++j) {
+                unsigned char c = (unsigned char)filenames[i][j];
+                if (c < 0x20U || c == 0x7fU || c == '/' || c == '\\' || c == ':') {
+                    free(candidate); return -1;
+                }
+            }
+            memcpy(item->filename, filenames[i], name_length + 1U);
+        } else rd_download_filename(item->url, item->filename, sizeof(item->filename));
         if (item->extract_after_download && password && *password)
             snprintf(item->extraction_password, sizeof(item->extraction_password), "%s", password);
     }
@@ -476,6 +497,31 @@ int rd_queue_has_related_file(const rd_queue *queue, unsigned long item_id,
         if (queue->related_files[i].item_id == item_id &&
             strcmp(queue->related_files[i].filename, filename) == 0) return 1;
     return 0;
+}
+
+int rd_queue_set_filename(rd_queue *queue, unsigned long item_id, const char *filename) {
+    rd_queue *candidate;
+    size_t i, length;
+    if (!queue || !item_id || !filename || !(length = strlen(filename)) ||
+        length > 250U || length >= sizeof(queue->items[0].filename) ||
+        !strcmp(filename, ".") || !strcmp(filename, "..")) return -1;
+    for (i = 0; i < length; ++i) {
+        unsigned char c = (unsigned char)filename[i];
+        if (c < 0x20U || c == 0x7fU || c == '/' || c == '\\' || c == ':') return -1;
+    }
+    candidate = (rd_queue *)malloc(sizeof(*candidate));
+    if (!candidate) return -1;
+    *candidate = *queue;
+    for (i = 0; i < candidate->count; ++i) {
+        if (candidate->items[i].id != item_id) continue;
+        memcpy(candidate->items[i].filename, filename, length + 1U);
+        if (save_queue(candidate) != 0) { free(candidate); return -1; }
+        *queue = *candidate;
+        free(candidate);
+        return 0;
+    }
+    free(candidate);
+    return -1;
 }
 
 int rd_queue_record_related_file(rd_queue *queue, unsigned long item_id,

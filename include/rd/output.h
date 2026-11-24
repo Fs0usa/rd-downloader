@@ -9,7 +9,8 @@ typedef struct rd_output {
 } rd_output;
 
 void rd_download_filename(const char *url, char *name, size_t capacity);
-int rd_output_paths(rd_output *out, const char *directory, const char *url, unsigned long id);
+int rd_filename_from_content_disposition(const char *header, char *name, size_t capacity);
+int rd_output_paths(rd_output *out, const char *directory, const char *filename, unsigned long id);
 int rd_output_create(const rd_output *out);
 int rd_output_discard(const rd_output *out, int include_final);
 #endif

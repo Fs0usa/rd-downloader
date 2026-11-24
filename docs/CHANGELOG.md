@@ -1,5 +1,12 @@
 # Changelog
 
+## Beta — 1.1.2-beta.9
+
+- Allow a filename to be edited for every queued link; persist the chosen name and use it for partial/final files and cleanup.
+- When a filename still matches the URL-derived default, use a safe `Content-Disposition: filename=` response name if the server provides one.
+- Reject responses explicitly identified as HTML pages and require confirmation for links whose URL has no recognizable filename/type.
+
+
 ## Beta — 1.1.2-beta.8
 
 - Recreate a missing download destination immediately before each transfer, validate it as a directory, and restore mode 0755.

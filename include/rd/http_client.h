@@ -19,6 +19,8 @@ typedef struct rd_http_response_headers {
     unsigned long long content_length;
     int chunked;
     char location[RD_HTTP_LOCATION_MAX];
+    char content_disposition[1024];
+    char content_type[128];
 } rd_http_response_headers;
 
 typedef int (*rd_http_progress_fn)(unsigned long long downloaded,
@@ -32,7 +34,7 @@ int rd_http_parse_response_headers(const char *text, size_t length,
                                    rd_http_response_headers *headers);
 
 /* Sequential download; PS5 builds use libSceHttp/libSceSsl, host tests use sockets. */
-int rd_http_download(const char *url, const char *directory, unsigned long item_id,
+int rd_http_download(const char *url, const char *directory, char *filename, size_t filename_capacity, unsigned long item_id,
                      rd_http_progress_fn progress, void *context,
                      char *error, size_t error_capacity);
 void rd_http_begin(unsigned long id);

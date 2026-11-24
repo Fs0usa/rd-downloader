@@ -26,7 +26,7 @@ int main(void) {
         char filename[512];
         rd_download_filename(url, filename, sizeof(filename));
         assert(strcmp(filename, "_DLPSGAME.COM_-PPSA21402.rar") == 0);
-        assert(rd_output_paths(&output, RD_DEFAULT_DOWNLOAD_DIRECTORY, url, 10) == 0);
+        assert(rd_output_paths(&output, RD_DEFAULT_DOWNLOAD_DIRECTORY, filename, 10) == 0);
         assert(strcmp(output.final, "/data/homebrew/downloads/_DLPSGAME.COM_-PPSA21402.rar") == 0);
         assert(strcmp(output.partial, "/data/homebrew/downloads/_DLPSGAME.COM_-PPSA21402.rar.part") == 0);
     }
@@ -42,7 +42,7 @@ int main(void) {
         struct stat st;
         int output_fd;
         assert(mkdtemp(directory) != NULL);
-        assert(rd_output_paths(&output, directory, url, 77) == 0);
+        assert(rd_output_paths(&output, directory, "archive.rar", 77) == 0);
         output_fd = rd_output_create(&output);
         assert(output_fd >= 0);
         assert(write(output_fd, "partial", 7) == 7);
