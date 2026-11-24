@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rd/http_client.h"
 #include "rd/output.h"
+#include "rd/log.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -498,6 +499,7 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
     rd_http_url url;
     unsigned int redirects;
     int fd = -1, file_fd = -1, result = -1;
+    int destination_created = 0;
     struct stat st;
     struct statvfs space;
     unsigned long long received = 0;
@@ -512,10 +514,22 @@ int rd_http_download(const char *input_url, const char *directory, unsigned long
         return -1;
     }
     strcpy(url_text, input_url);
-    if (stat(directory, &st) != 0 || !S_ISDIR(st.st_mode) || access(directory, W_OK) != 0) {
-        set_error(error, error_capacity, "destination is missing or not writable");
+    if (mkdir(directory, 0755) == 0) destination_created = 1;
+    else if (errno != EEXIST) {
+        snprintf(error, error_capacity, "cannot create destination directory (errno=%d)", errno);
         return -1;
     }
+    if (lstat(directory, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        snprintf(error, error_capacity, "destination directory is unavailable (errno=%d)", errno);
+        return -1;
+    }
+    if (chmod(directory, 0755) != 0) {
+        snprintf(error, error_capacity, "cannot set destination directory mode (errno=%d)", errno);
+        return -1;
+    }
+    if (destination_created)
+        rd_log_write("INFO", "download engine recreated destination directory=%s mode=0755",
+                     directory);
 
     for (redirects = 0; redirects <= RD_HTTP_REDIRECT_LIMIT; ++redirects) {
         rd_socket_reader reader;

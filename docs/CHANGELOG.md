@@ -1,5 +1,10 @@
 # Changelog
 
+## Beta — 1.1.2-beta.8
+
+- Recreate a missing download destination immediately before each transfer, validate it as a directory, and restore mode 0755.
+- Log successful destination recreation; report setup failures with the filesystem errno.
+
 ## Beta — 1.1.2-beta.7
 
 - Keep `.elf` in the process title so Payload Manager recognizes RD Downloader as a payload and displays its payload icon.

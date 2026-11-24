@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rd/http_client.h"
 #include "rd/output.h"
+#include "rd/log.h"
 
 #ifndef RD_HOST_BUILD
 
@@ -105,6 +106,37 @@ static int probe_directory_write(const char *directory, unsigned long item_id,
         errno = saved_errno;
         return -1;
     }
+    return 0;
+}
+
+static int ensure_download_directory(const char *directory,
+                                     char *error, size_t error_capacity) {
+    struct stat st;
+    int created = 0;
+    if (mkdir(directory, 0755) == 0) created = 1;
+    else if (errno != EEXIST) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "cannot create destination directory (errno=%d)", errno);
+        return -1;
+    }
+    if (lstat(directory, &st) != 0) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "destination stat failed (errno=%d)", errno);
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        set_error(error, error_capacity, "destination is not a directory");
+        errno = ENOTDIR;
+        return -1;
+    }
+    if (chmod(directory, 0755) != 0) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "cannot set destination directory mode (errno=%d)", errno);
+        return -1;
+    }
+    if (created)
+        rd_log_write("INFO", "download engine recreated destination directory=%s mode=0755",
+                     directory);
     return 0;
 }
 
@@ -365,13 +397,10 @@ int rd_ps5_http_download(const char *input_url, const char *directory,
         set_error(error, error_capacity, "only valid HTTP and HTTPS URLs are supported");
         return -1;
     }
+    if (ensure_download_directory(directory, error, error_capacity) != 0) return -1;
     if (stat(directory, &st) != 0) {
         if (error && error_capacity)
-            snprintf(error, error_capacity, "destination stat failed (errno=%d)", errno);
-        return -1;
-    }
-    if (!S_ISDIR(st.st_mode)) {
-        set_error(error, error_capacity, "destination is not a directory");
+            snprintf(error, error_capacity, "destination stat failed after setup (errno=%d)", errno);
         return -1;
     }
     if (probe_directory_write(directory, item_id, error, error_capacity) != 0) {

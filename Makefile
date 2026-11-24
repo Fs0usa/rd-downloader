@@ -55,7 +55,7 @@ host-test:
 		tests/test_queue.c src/core/queue.c src/core/output.c src/core/log.c -o build-queue-tests
 	./build-queue-tests
 	$(HOST_CC) -std=c11 -DRD_HOST_BUILD -Wall -Wextra -Werror -O2 -Iinclude \
-		tests/test_http_client.c src/core/http_client.c src/core/output.c -o build-http-tests
+		tests/test_http_client.c src/core/http_client.c src/core/output.c src/core/log.c -o build-http-tests
 	./build-http-tests
 	rm -f build-range-tests build-space-tests build-queue-tests build-http-tests
 
