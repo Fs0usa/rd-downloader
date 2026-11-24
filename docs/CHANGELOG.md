@@ -1,5 +1,10 @@
 # Changelog
 
+## Beta — 1.1.2-beta.6
+
+- Set the running process title to `rd-downloader` at startup so Payload Manager's Active Processes view shows the project name regardless of launch method.
+- Continue publishing the version badge through the Payload Manager catalog metadata.
+
 ## Beta — 1.1.2-beta.5
 
 - Replace the PS5 `access(W_OK)` destination check with an actual temporary-file write probe, avoiding false permission failures when real and effective UIDs differ.

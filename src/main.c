@@ -2,6 +2,7 @@
 #include <string.h>
 #include "rd/http_server.h"
 #include "rd/version.h"
+#include "rd/log.h"
 
 #ifndef RD_HOST_BUILD
 typedef struct rd_notification_request {
@@ -11,6 +12,7 @@ typedef struct rd_notification_request {
 
 /* This PS5 kernel API is used by the installed SDK's samples/hello_world. */
 int sceKernelSendNotificationRequest(int, rd_notification_request *, size_t, int);
+int sceKernelSetProcessName(const char *name);
 #endif
 
 /*
@@ -25,6 +27,11 @@ main(void)
     return rd_http_server_run("127.0.0.1", RD_HTTP_DEFAULT_PORT);
 #else
     rd_notification_request request;
+    int process_name_result;
+
+    process_name_result = sceKernelSetProcessName("rd-downloader");
+    if (process_name_result != 0)
+        rd_log_write("ERROR", "sceKernelSetProcessName failed result=%d", process_name_result);
 
     memset(&request, 0, sizeof(request));
     snprintf(request.message, sizeof(request.message),
