@@ -1383,7 +1383,8 @@ static void handle_client(int fd) {
                 }
                 pthread_mutex_unlock(&queue_mutex);
                 if (add_result < 0) {
-                    static const char error_body[] = "queue persistence failed or queue is full\n";
+                    rd_log_write("ERROR", "queue add failed count=%d reason=persistence-full-or-invalid-filename", count);
+                    static const char error_body[] = "queue persistence failed, queue full, or filename invalid\n";
                     (void)send_response(fd, 503, "Service Unavailable", "text/plain; charset=utf-8",
                                         error_body, sizeof(error_body) - 1U);
                 } else {

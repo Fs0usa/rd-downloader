@@ -1,5 +1,11 @@
 # Changelog
 
+## Beta — 1.1.2-beta.11
+
+- Keep URL-derived names within the backend limit and send unchanged suggestions as empty names so the backend derives them consistently. This allows long signed URLs to be queued and lets Content-Disposition supply the real filename.
+- Log a specific queue-add failure diagnostic when persistence, capacity, or filename validation rejects an add request.
+
+
 ## Beta — 1.1.2-beta.10
 
 - Avoid showing the opaque-link warning for signed `/download/` URLs (`sig`, `signature`, `token` or `X-Amz-Signature` query parameter). These URLs may provide their filename through the response headers.
