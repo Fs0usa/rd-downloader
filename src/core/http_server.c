@@ -38,6 +38,7 @@
 
 static rd_queue server_queue;
 static int queue_ready;
+static int download_directory_ready;
 static pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t worker_condition = PTHREAD_COND_INITIALIZER;
 static int download_requested = 1;
@@ -52,19 +53,24 @@ static int send_response(int fd, int status, const char *reason,
                          size_t body_length);
 
 static int send_health(int fd) {
-    char body[256];
+    char body[320];
     size_t i;
     int active = 0, length, ready;
+    int queue_available, download_directory_available;
     pthread_mutex_lock(&queue_mutex);
     for (i = 0; i < server_queue.count; ++i)
         if (server_queue.items[i].state == RD_JOB_DOWNLOADING) active = 1;
     ready = worker_started;
+    queue_available = queue_ready;
+    download_directory_available = download_directory_ready;
     pthread_mutex_unlock(&queue_mutex);
     length = snprintf(body, sizeof(body),
         "{\"status\":\"ok\",\"application\":\"rd-downloader\","
-        "\"version\":\"1.1.0-dev\",\"transport\":\"http-https\","
-        "\"worker_ready\":%s,\"downloader_active\":%s}\n",
-        ready ? "true" : "false", active ? "true" : "false");
+        "\"version\":\"1.1.1-dev\",\"transport\":\"http-https\","
+        "\"worker_ready\":%s,\"queue_ready\":%s,\"download_directory_ready\":%s,"
+        "\"downloader_active\":%s}\n",
+        ready ? "true" : "false", queue_available ? "true" : "false",
+        download_directory_available ? "true" : "false", active ? "true" : "false");
     if (length < 0 || (size_t)length >= sizeof(body)) return -1;
     return send_response(fd, 200, "OK", "application/json; charset=utf-8", body, (size_t)length);
 }
@@ -251,8 +257,9 @@ static int send_queue(int fd) {
         "application/json; charset=utf-8", no_memory, sizeof(no_memory) - 1U);
     pthread_mutex_lock(&queue_mutex);
     n = snprintf(body, RD_HTTP_QUEUE_RESPONSE,
-                 "{\"online\":true,\"dir\":\"%s\",\"extractDir\":\"%s\",\"canExtract\":true,\"items\":[",
-                 RD_DOWNLOAD_DIRECTORY, RD_EXTRACTION_DIRECTORY);
+                 "{\"online\":true,\"dir\":\"%s\",\"extractDir\":\"%s\",\"downloadDirReady\":%s,\"canExtract\":true,\"items\":[",
+                 RD_DOWNLOAD_DIRECTORY, RD_EXTRACTION_DIRECTORY,
+                 download_directory_ready ? "true" : "false");
     if (n < 0 || (size_t)n >= RD_HTTP_QUEUE_RESPONSE) goto serialization_failed;
     used = (size_t)n;
     for (i = 0; i < server_queue.count; ++i) {
@@ -643,7 +650,7 @@ static void *download_worker(void *unused) {
 
         pthread_mutex_lock(&queue_mutex);
         for (;;) {
-            if (download_requested) {
+            if (download_requested && download_directory_ready) {
                 for (i = 0; i < server_queue.count; ++i) {
                     rd_queue_item *item = &server_queue.items[i];
                     if (item->state != RD_JOB_QUEUED) continue;
@@ -1092,11 +1099,9 @@ static int prepare_download_directories(void) {
 #ifdef RD_HOST_BUILD
     if (mkdir(RD_EXTRACTION_DIRECTORY, 0700) != 0 && errno != EEXIST) return -1;
 #endif
-    if (lstat(RD_EXTRACTION_DIRECTORY, &st) != 0 || !S_ISDIR(st.st_mode) ||
-        access(RD_EXTRACTION_DIRECTORY, W_OK | X_OK) != 0) return -1;
-    if (mkdir(RD_DOWNLOAD_DIRECTORY, 0700) != 0 && errno != EEXIST) return -1;
-    if (lstat(RD_DOWNLOAD_DIRECTORY, &st) != 0 || !S_ISDIR(st.st_mode) ||
-        access(RD_DOWNLOAD_DIRECTORY, W_OK | X_OK) != 0) return -1;
+    if (mkdir(RD_DOWNLOAD_DIRECTORY, 0755) != 0 && errno != EEXIST) return -1;
+    if (lstat(RD_DOWNLOAD_DIRECTORY, &st) != 0 || !S_ISDIR(st.st_mode)) return -1;
+    if (chmod(RD_DOWNLOAD_DIRECTORY, 0755) != 0) return -1;
     return 0;
 }
 
@@ -1110,7 +1115,10 @@ int rd_http_server_run(const char *bind_address, unsigned short port) {
 #else
     queue_ready = rd_queue_init(&server_queue, "/data/rd-downloader-queue.db") == 0;
 #endif
-    if (queue_ready && prepare_download_directories() != 0) queue_ready = 0;
+    download_directory_ready = queue_ready && prepare_download_directories() == 0;
+    if (queue_ready && !download_directory_ready)
+        fprintf(stderr, "RD Downloader: cannot prepare downloads directory %s: %s\n",
+                RD_DOWNLOAD_DIRECTORY, strerror(errno));
 
     if (queue_ready) {
         for (size_t i = server_queue.count; i > 0; --i) {

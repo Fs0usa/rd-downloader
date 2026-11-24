@@ -2,6 +2,7 @@
 
 ## Unreleased — 1.1.0 development
 
+- Create `/data/homebrew/downloads` with mode 755; report queue readiness separately from download-folder readiness.
 - Save new downloads in `/data/homebrew/downloads`; extract archives and copy `.pkg` files into `/data/homebrew`.
 - Preserve archive-provided folder structure during extraction.
 - Copy extracted `.pkg` files to the destination root without removing their extracted originals or overwriting existing root files.
